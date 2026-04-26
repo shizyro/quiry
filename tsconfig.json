@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ESNext",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "lib": ["ESNext", "DOM"],
+    "types": ["node"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+
+    "outDir": "./dist",
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["./src/**/*.ts", "./examples/**/*.ts", "./tests/**/*.ts"],
+  "exclude": ["./node_modules", "./dist"]
+}

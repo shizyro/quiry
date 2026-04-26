@@ -1,0 +1,64 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.11/schema.json",
+  "formatter": {
+    "lineWidth": 110,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "bracketSpacing": true
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "linter": {
+    "rules": {
+      "correctness": {
+        "noUnusedFunctionParameters": "off",
+        "noUnusedPrivateClassMembers": "off",
+        "noUnusedVariables": "off",
+        "noUnusedImports": "off"
+      },
+      "suspicious": {
+        "noFallthroughSwitchClause": "info",
+        "noExplicitAny": "off",
+        "noConsole": "off",
+        "useAwait": "off",
+        "noAssignInExpressions": "off",
+        "noEmptyInterface": "off",
+        "noBitwiseOperators": "off"
+      },
+      "style": {
+        "useDefaultSwitchClause": "off",
+        "useBlockStatements": "off",
+        "noMagicNumbers": "off",
+        "useTemplate": "off",
+        "noNestedTernary": "off",
+        "noInferrableTypes": "off",
+        "noNonNullAssertion": "off",
+        "useUnifiedTypeSignatures": "off",
+        "useImportType": "warn",
+        "noParameterProperties": "off",
+        "useConsistentMemberAccessibility": "info",
+        "noUnusedTemplateLiteral": "warn",
+        "useExponentiationOperator": "off",
+        "useNumericSeparators": "info",
+        "useReadonlyClassProperties": "info"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "off",
+        "noStaticOnlyClass": "off",
+        "noThisInStatic": "warn",
+        "noVoid": "off",
+        "useArrowFunction": "off",
+        "noBannedTypes": "off"
+      },
+      "nursery": {
+        // "useMaxParams": "off",
+        "noShadow": "off"
+      }
+    }
+  }
+}

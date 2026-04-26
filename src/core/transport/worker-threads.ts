@@ -1,0 +1,99 @@
+import { Worker, isMainThread, parentPort } from "node:worker_threads";
+import type { MessagePort, Transferable } from "node:worker_threads";
+
+import { BaseTransport } from "./base";
+import { TransportError, type TransportOptions } from ".";
+
+export interface WorkerThreadsTransportOptions extends TransportOptions {
+  readonly worker?: Worker;
+}
+
+export class WorkerThreadsTransport extends BaseTransport {
+  private readonly port: Worker | MessagePort;
+
+  constructor(opts: WorkerThreadsTransportOptions = {}) {
+    super();
+
+    if (isMainThread) {
+      if (!opts.worker) throw new TypeError("Worker is required in main thread");
+      this.port = opts.worker;
+    } else {
+      if (!parentPort) throw new TypeError("parentPort is null — ensure this is running in a worker thread");
+      this.port = parentPort;
+    }
+  }
+
+  async open(): Promise<void> {
+    if (this.state !== "connecting") {
+      throw new TransportError("Cannot open transport that is not in the connecting state");
+    }
+
+    this.port.on("message", this.onPortMessage);
+    this.port.on("error", this.onPortError);
+
+    if (this.port instanceof Worker) {
+      this.port.on("exit", this.onPortExit);
+
+      // Wait for the worker to be online
+      await new Promise((resolve) => this.port.once("online", resolve));
+    } else {
+      this.port.on("close", this.onPortClose);
+      this.port.start();
+    }
+
+    this.transition("open");
+  }
+
+  async close(): Promise<void> {
+    if (this.state === "closed" || this.state === "draining") return;
+    this.transition("draining");
+
+    // Remove all listeners
+    this.port.off("message", this.onPortMessage);
+    this.port.off("error", this.onPortError);
+
+    if (this.port instanceof Worker) {
+      this.port.off("exit", this.onPortExit);
+      // Terminate worker thread
+      await this.port.terminate();
+    } else {
+      this.port.off("close", this.onPortClose);
+      this.port.close();
+    }
+
+    this.queue.close();
+    this.transition("closed");
+    this.cleanup();
+  }
+
+  protected post(packet: unknown, transferables: Transferable[]): void {
+    if (transferables.length > 0) {
+      this.port.postMessage(packet, transferables);
+    } else {
+      // @ts-expect-error - postMessage without transferables is supported
+      this.port.postMessage(packet);
+    }
+  }
+
+  // ...
+
+  private readonly onPortMessage = (value: unknown): void => this.read(value);
+
+  private readonly onPortError = (error: Error): void => {
+    this.terminate("Worker thread errored", error);
+  };
+
+  private readonly onPortExit = (code: number): void => {
+    if (this.state === "draining" || this.state === "closed") return;
+    // Code 0 is a clean, cooperative shutdown (e.g. `process.exit(0)`); anything else
+    // is abnormal and must be surfaced to the session as `terminated`.
+    if (code === 0) return void this.close();
+    this.terminate(`Worker thread exited with code ${code}`);
+  };
+
+  private readonly onPortClose = (): void => {
+    if (this.state === "draining" || this.state === "closed") return;
+    // The port was closed by the remote — we cannot send or receive further.
+    this.terminate("Message port closed by remote");
+  };
+}

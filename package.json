@@ -1,0 +1,32 @@
+{
+  "name": "quiry",
+  "version": "0.1.0",
+  "author": {
+    "name": "Shizuka Yashiro",
+    "email": "shizuka.yashiro@gmail.com"
+  },
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "license": "MIT",
+  "scripts": {
+    "build": "bunchee --sourcemap --target es2022",
+    "check-types": "tsc --noEmit",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bunchee": "^6.10.0",
+    "vitest": "^4.1.5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/nanoid": "^3.0.0",
+    "@types/p-limit": "^2.2.0",
+    "nanoid": "^5.1.9",
+    "object-sizeof": "^2.6.5",
+    "p-limit": "^7.3.0"
+  }
+}
