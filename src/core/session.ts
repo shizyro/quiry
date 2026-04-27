@@ -13,8 +13,10 @@ import {
   type AnySystemPacket,
   type AnyTypedPacket,
   type CallRequestPacket,
+  type CancelRequestPacket,
   type HandshakePayload,
   type PacketByKind,
+  type StreamResponsePacket,
   type SystemDrainAckPacket,
   type SystemDrainPacket,
   type SystemHandshakePacket,
@@ -22,10 +24,12 @@ import {
 } from "@/interface/packets";
 
 import { Router } from "@/lib/router";
+import { AsyncQueue } from "@/lib/queue";
+import { fromWireError, isRetryableStatus, QuiryError, toWireError } from "@/lib/errors";
 
 import { nanoid } from "nanoid";
-import { delay, retryable, isSerializable, clip, timeout, abortable } from "@/lib/utils";
-import { fromWireError, isRetryableStatus, QuiryError, toWireError } from "@/lib/errors";
+import { isSerializable, retryable, clip, timeout, abortable } from "@/lib/utils";
+import sizeof from "object-sizeof";
 
 import { threadId } from "node:worker_threads";
 import { localNodeId } from "@/shared";
@@ -41,7 +45,7 @@ export interface SessionConfig {
 
 export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
 
-export type InquiryFunc = (request: InquiryRequest) => Promise<unknown>;
+export type InquiryFunc = (request: InquiryRequest) => Promise<unknown> | AsyncIterableIterator<unknown>;
 export type InquiryRequest = Readonly<{
   id: CorrelationId;
   service: string;
@@ -51,10 +55,33 @@ export type InquiryRequest = Readonly<{
 }>;
 
 interface PendingCallRequest<T = unknown> {
+  readonly kind: "call";
   resolve: (value: T) => void;
   reject: (error: Error) => void;
   timestamp: number;
   timer?: ReturnType<typeof setTimeout>;
+}
+
+interface PendingStreamRequest {
+  readonly kind: "stream";
+  readonly queue: AsyncQueue<unknown>;
+  readonly credit: { remaining: number };
+  timer?: ReturnType<typeof setTimeout>;
+  seq: number;
+}
+
+/**
+ * Producer-side state for an in-flight streaming response. Tracks the flow
+ * control budget granted by the remote consumer and the cancellation flag so
+ * the inquiry iterator can be terminated mid-stream.
+ */
+interface OutboundStream {
+  /** Chunks we are allowed to send before needing more credit. */
+  credit: number;
+  /** Pending waiter blocked on credit; resolved with `false` on cancel. */
+  waiter: ((ok: boolean) => void) | null;
+  cancelled: boolean;
+  iterator: AsyncIterableIterator<unknown>;
 }
 
 export interface SessionEvents {
@@ -74,8 +101,12 @@ export class Session extends EventEmitter<SessionEvents> {
   private readonly inbound = new InFlightTracker();
   private readonly outbound = new InFlightTracker();
 
-  readonly #pending = new Map<CorrelationId, PendingCallRequest>();
+  readonly #pending = new Map<CorrelationId, PendingCallRequest | PendingStreamRequest>();
+  readonly #streams = new Map<CorrelationId, OutboundStream>();
   readonly #controllers = new Map<CorrelationId, AbortController>();
+
+  /** The number of chunks to prefetch for each streaming request. */
+  readonly window: number = 100;
 
   constructor(
     private readonly transport: Transport,
@@ -118,26 +149,6 @@ export class Session extends EventEmitter<SessionEvents> {
     this.emit("state-change", state);
 
     this.logger?.debug(`Session state changed to ${state.toUpperCase()}`);
-  }
-
-  async wait<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate?: (packet: PacketByKind<K>) => packet is R,
-    timeout?: number,
-  ): Promise<R> {
-    // @ts-expect-error - no plans to type this properly
-    return this.router
-      .wait((packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true), {
-        timeout, // TODO: abort signal
-      })
-      .catch((error: unknown) => {
-        if (error instanceof Error && error.message.includes("Timeout")) {
-          throw new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for packet", {
-            cause: error,
-          });
-        }
-        throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause: error });
-      });
   }
 
   /** --------- PUBLIC API: LIFECYCLE --------- */
@@ -258,9 +269,9 @@ export class Session extends EventEmitter<SessionEvents> {
     this.transport.on("state-change", (next) => next === "closed" && controller.abort());
 
     try {
-      // Local initiator announces. Remote initiator stays silent —
-      // its peer has already sent DRAIN and is waiting for our
-      // terminal ACK, which we'll send in step 3 after we quiesce.
+      // 1. Local initiator announces. Remote initiator stays silent —
+      //    its peer has already sent DRAIN and is waiting for our
+      //    terminal ACK, which we'll send in step 3 after we quiesce.
       if (initiator === "local") {
         await this.send({
           kind: WireKind.SYSTEM,
@@ -269,11 +280,40 @@ export class Session extends EventEmitter<SessionEvents> {
         } satisfies OmitStandardFields<SystemDrainPacket>).catch(() => null);
       }
 
-      // Quiesce and ACK in parallel with waiting for the peer's ACK.
+      // 2. Proactively terminate work that can run past the deadline:
+      //    producer-side generators (may emit indefinitely) and the
+      //    consumer-side iterators we're no longer going to consume.
+      let count = 0;
+      for (const stream of this.#streams.values()) {
+        this.cancelOutboundStream(stream);
+        count++;
+      }
+
+      for (const [ref, entry] of Array.from(this.#pending)) {
+        if (entry.kind !== "stream") continue;
+
+        clearTimeout(entry.timer);
+        this.#pending.delete(ref);
+        this.outbound.exit();
+        entry.queue.fail(
+          new QuiryError(WireStatus.ABORTED, "Stream aborted by session drain", {
+            correlationId: ref,
+          }),
+        );
+
+        // Tell the producer to stop emitting.
+        void this.send({
+          kind: WireKind.REQUEST,
+          type: RequestMessageType.CANCEL,
+          payload: { ref },
+        } satisfies OmitStandardFields<CancelRequestPacket>).catch(() => null);
+      }
+
+      // 3. Quiesce and ACK in parallel with waiting for the peer's ACK.
       //
-      // `quiesce` waits for our in-flight work; once it resolves, we
-      // send the terminal DRAIN_ACK if the peer's DRAIN ref is known.
-      // Both tasks share the same `drainTimeout` via `controller`.
+      //    `quiesce` waits for our in-flight work; once it resolves, we
+      //    send the terminal DRAIN_ACK if the peer's DRAIN ref is known.
+      //    Both tasks share the same `drainTimeout` via `controller`.
       const quiesce = Promise.all([this.inbound.idle(), this.outbound.idle()]).then(async () => {
         if (this.#peer_drain_ref) {
           await this.send({
@@ -321,6 +361,29 @@ export class Session extends EventEmitter<SessionEvents> {
     }
   }
 
+  /**
+   * Mark an outbound stream as cancelled and best-effort terminate its
+   * source iterator. Called from CANCEL handling on the wire and from
+   * session teardown.
+   */
+  private cancelOutboundStream(stream: OutboundStream): void {
+    if (stream.cancelled) return;
+    stream.cancelled = true;
+
+    // Release any credit waiter so the streaming loop can exit.
+    const waiter = stream.waiter;
+    stream.waiter = null;
+    if (waiter) waiter(false);
+
+    // Best-effort abort of the underlying source. We swallow errors —
+    // the iterator may already be closed or may not implement `return`.
+    if (typeof stream.iterator.return === "function") {
+      void Promise.resolve(stream.iterator.return(undefined)).catch(() => {
+        // observable; the stream is going away anyway
+      });
+    }
+  }
+
   private async terminate(): Promise<void> {
     await this.transport.close().catch(() => null);
     this.teardown();
@@ -336,6 +399,10 @@ export class Session extends EventEmitter<SessionEvents> {
 
     // Reject all pending calls
     this.rejectAllPending(new QuiryError(WireStatus.ABORTED, "Session draining"));
+
+    // Force unlock all activity counters and drain waiters
+    this.inbound.drain();
+    this.outbound.drain();
 
     this.emit("state-change", "closed");
     this.emit("close");
@@ -354,13 +421,13 @@ export class Session extends EventEmitter<SessionEvents> {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open", { traceId: control?.traceId });
     }
 
-    const correlation = nanoid() as CorrelationId;
     // Ensure arguments can be cloned through port
     if (!isSerializable(args))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
         detail: { args },
       });
 
+    const correlation = nanoid() as CorrelationId;
     const body = {
       id: correlation,
       kind: WireKind.REQUEST,
@@ -412,6 +479,7 @@ export class Session extends EventEmitter<SessionEvents> {
           );
 
           this.#pending.set(body.id, {
+            kind: "call",
             resolve: (value: unknown): void => {
               release();
               resolve(value);
@@ -453,6 +521,171 @@ export class Session extends EventEmitter<SessionEvents> {
         signal,
       },
     );
+  }
+
+  stream(
+    service: string,
+    method: string,
+    args: ReadonlyArray<unknown>,
+    control?: Omit<RequestControl, "abortable">,
+    signal?: AbortSignal,
+  ): AsyncIterableIterator<unknown> {
+    if (this.#state !== "open") {
+      const q = new AsyncQueue<unknown>();
+      void q.throw(new QuiryError(WireStatus.UNAVAILABLE, "Session is not open"));
+      return q;
+    }
+
+    // Ensure arguments can be cloned through port
+    if (!isSerializable(args))
+      throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
+        detail: { args },
+      });
+
+    const correlation = nanoid() as CorrelationId;
+    const queue = new AsyncQueue<unknown>();
+
+    // The initial budget we grant the producer. Set synchronously so that
+    // chunks arriving before the CALL `.then` callback still decrement the
+    // right counter (producer cannot start until it sees the credit grant,
+    // but other incoming packets are routed concurrently).
+    const credit = { remaining: this.window };
+    const context = { correlationId: correlation, traceId: control?.traceId };
+
+    this.logger?.debug(`Opening stream ${clip(correlation)} to ${service}.${method} (window=${this.window})`);
+
+    const entry: PendingStreamRequest = { kind: "stream", queue, credit, seq: 0 };
+    if (control?.timeout) {
+      entry.timer = setTimeout(() => {
+        this.logger?.debug(`Stream ${clip(correlation)} timed out after ${control.timeout}ms`);
+        this.#pending.delete(correlation);
+        this.outbound.exit();
+        queue.fail(new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Stream request timed out", context));
+
+        // Best-effort cancel on the producer side so it stops emitting.
+        void this.send({
+          kind: WireKind.REQUEST,
+          type: RequestMessageType.CANCEL,
+          payload: { ref: correlation },
+        } satisfies OmitStandardFields<CancelRequestPacket>).catch(() => {
+          // observable; deadline already fired locally
+        });
+      }, control.timeout);
+    }
+
+    this.#pending.set(correlation, entry);
+    this.outbound.enter();
+
+    // Send CALL and initial credit grant. CREDIT is bundled as a separate
+    // STREAM response packet referencing the correlation; the producer
+    // cannot emit chunks until it observes this grant.
+    void (async () => {
+      try {
+        await this.forward({
+          id: correlation,
+          kind: WireKind.REQUEST,
+          type: RequestMessageType.CALL,
+          from: localNodeId,
+          timestamp: Date.now(),
+          payload: { service, method, args, control },
+        } satisfies CallRequestPacket);
+
+        await this.send({
+          kind: WireKind.RESPONSE,
+          type: ResponseMessageType.STREAM,
+          payload: { event: "credit", ref: correlation, credit: this.window },
+        } satisfies OmitStandardFields<StreamResponsePacket>);
+
+        this.logger?.trace(`Stream ${clip(correlation)} initial credit grant sent (credit=${this.window})`);
+      } catch (cause: unknown) {
+        this.logger?.warn(
+          `Failed to initiate stream ${clip(correlation)}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+
+        const entry = this.#pending.get(correlation);
+        if (entry?.kind === "stream") {
+          clearTimeout(entry.timer);
+          this.#pending.delete(correlation);
+          this.outbound.exit();
+          queue.fail(
+            new QuiryError(WireStatus.DATA_LOSS, "Failed to initiate stream", { ...context, cause }),
+          );
+        }
+      }
+    })();
+
+    const self = this;
+    const cleanup = (): void => {
+      const entry = self.#pending.get(correlation);
+      if (entry?.kind === "stream" && entry.timer) clearTimeout(entry.timer);
+      self.#pending.delete(correlation);
+      self.outbound.exit();
+    };
+
+    return {
+      next(): Promise<IteratorResult<unknown>> {
+        return queue.next();
+      },
+      [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
+        return this;
+      },
+      async return(): Promise<IteratorResult<unknown, undefined>> {
+        self.logger?.trace(`Stream ${clip(correlation)} consumer returned; sending CANCEL`);
+        // Notify the producer to abort. Fire-and-forget; cleanup is
+        // local and must not wait on the wire.
+        void self
+          .send({
+            kind: WireKind.REQUEST,
+            type: RequestMessageType.CANCEL,
+            payload: { ref: correlation },
+          } satisfies OmitStandardFields<CancelRequestPacket>)
+          .catch(() => {
+            // observable; consumer already abandoned the iterator
+          });
+
+        cleanup();
+        await queue.return();
+
+        return { value: undefined, done: true };
+      },
+      async throw(error?: unknown): Promise<IteratorResult<unknown, undefined>> {
+        self.logger?.trace(`Stream ${clip(correlation)} consumer threw; sending CANCEL`);
+        void self
+          .send({
+            kind: WireKind.REQUEST,
+            type: RequestMessageType.CANCEL,
+            payload: { ref: correlation },
+          } satisfies OmitStandardFields<CancelRequestPacket>)
+          .catch(() => {
+            // observable
+          });
+
+        cleanup();
+        queue.fail(new QuiryError(WireStatus.CANCELLED, "Stream aborted by consumer", { cause: error }));
+
+        return { value: undefined, done: true };
+      },
+    };
+  }
+
+  async wait<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
+    kind: K,
+    predicate?: (packet: PacketByKind<K>) => packet is R,
+    timeout?: number,
+  ): Promise<R> {
+    // @ts-expect-error - no plans to type this properly
+    return this.router
+      .wait((packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true), {
+        timeout, // TODO: abort signal
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.message.includes("Timeout")) {
+          throw new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for packet", {
+            cause: error,
+          });
+        }
+        throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause: error });
+      });
   }
 
   /** --------- INTERNALS: ROUTING --------- */
@@ -539,6 +772,17 @@ export class Session extends EventEmitter<SessionEvents> {
     if (packet.type === RequestMessageType.ABORT) {
       this.#controllers.get(packet.payload.ref)?.abort();
       return;
+    } else if (packet.type === RequestMessageType.CANCEL) {
+      // CANCEL bypasses any queue/semaphore — the producer must stop
+      // emitting as soon as possible. The cancel is idempotent: missing
+      // refs (already completed, already cancelled) are observable, not
+      // errors.
+      const outbound = this.#streams.get(packet.payload.ref);
+      if (!outbound) return;
+
+      this.logger?.debug(`Cancelling outbound stream ${clip(packet.payload.ref)}`);
+      this.cancelOutboundStream(outbound);
+      return;
     }
 
     const context = {
@@ -595,30 +839,43 @@ export class Session extends EventEmitter<SessionEvents> {
 
       try {
         const result = this.config.inquiry(request);
-        const value = await abortable(
-          timeout(
-            result,
-            (packet.payload.control?.timeout ?? this.config.defaultTimeout) - (Date.now() - packet.timestamp),
-            "Timeout waiting for inquiry response",
-          ),
-          controller?.signal,
-        ).finally(() => controller && this.#controllers.delete(packet.id));
+        const isIterable = typeof result === "object" && result !== null && Symbol.asyncIterator in result;
 
-        if (!isSerializable(value))
-          throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
-            ...context,
-            detail: { value },
-          });
+        const value = !isIterable
+          ? await abortable(
+              timeout(
+                result,
+                (packet.payload.control?.timeout ?? this.config.defaultTimeout) -
+                  (Date.now() - packet.timestamp),
+                "Timeout waiting for inquiry response",
+              ),
+              controller?.signal,
+            ).finally(() => controller && this.#controllers.delete(packet.id))
+          : result;
 
-        return await this.send({
-          kind: WireKind.RESPONSE,
-          type: ResponseMessageType.VALUE,
-          payload: {
-            ref: packet.id,
-            status: WireStatus.OK,
-            result: value,
-          },
-        } satisfies OmitStandardFields<ValueResponsePacket>);
+        // Streaming results must be detected *before* the serialization
+        // check: async iterators have a non-plain prototype and would
+        // otherwise be rejected as non-serializable. Individual chunks are
+        // validated as they are pulled from the iterator.
+        if (isIterable) {
+          await this.streamInboundResponse(packet.id, value as AsyncIterableIterator<unknown>);
+        } else {
+          if (!isSerializable(value))
+            throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
+              ...context,
+              detail: { value },
+            });
+
+          return await this.send({
+            kind: WireKind.RESPONSE,
+            type: ResponseMessageType.VALUE,
+            payload: {
+              ref: packet.id,
+              status: WireStatus.OK,
+              result: value,
+            },
+          } satisfies OmitStandardFields<ValueResponsePacket>);
+        }
       } catch (cause: unknown) {
         // The session stays up; the caller learns about the failure via the wire error.
         const error = QuiryError.from(cause, context);
@@ -643,10 +900,217 @@ export class Session extends EventEmitter<SessionEvents> {
     });
   }
 
+  private async streamInboundResponse(
+    ref: CorrelationId,
+    iterable: AsyncIterableIterator<unknown>,
+  ): Promise<void> {
+    const stream: OutboundStream = {
+      credit: 0,
+      waiter: null,
+      cancelled: false,
+      iterator: iterable,
+    };
+    this.#streams.set(ref, stream);
+    this.logger?.debug(`Starting outbound stream ${clip(ref)}`);
+
+    let seq = 0;
+    try {
+      for (;;) {
+        // Wait for credit before pulling the next chunk. Blocking
+        // *before* pulling means a slow consumer doesn't cause us to
+        // materialize chunks only to have them queue up in memory.
+        while (stream.credit <= 0) {
+          if (stream.cancelled) return;
+          this.logger?.trace(`Stream ${clip(ref)} waiting for credit (sent=${seq}, credit=${stream.credit})`);
+          const granted = await new Promise<boolean>((resolve) => {
+            stream.waiter = resolve;
+          });
+          if (!granted || stream.cancelled) return;
+        }
+
+        const result = await iterable.next();
+        if (stream.cancelled) return;
+        if (result.done) break;
+
+        const chunk = result.value;
+        if (!isSerializable(chunk)) {
+          throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Stream chunk is not serializable", {
+            correlationId: ref,
+            detail: { seq },
+          });
+        }
+
+        stream.credit--;
+        await this.send({
+          kind: WireKind.RESPONSE,
+          type: ResponseMessageType.STREAM,
+          payload: { event: "chunk", ref, seq, chunk },
+        } satisfies OmitStandardFields<StreamResponsePacket>);
+
+        this.logger?.trace(`Stream ${clip(ref)} sent chunk seq=${seq} (credit=${stream.credit} remaining)`);
+        seq++;
+      }
+
+      if (stream.cancelled) return;
+      await this.send({
+        kind: WireKind.RESPONSE,
+        type: ResponseMessageType.STREAM,
+        payload: { event: "end", ref, seq },
+      } satisfies OmitStandardFields<StreamResponsePacket>);
+
+      this.logger?.debug(`Outbound stream ${clip(ref)} ended (${seq} chunks sent)`);
+    } catch (cause: unknown) {
+      if (stream.cancelled) return;
+      const error = QuiryError.from(cause, { correlationId: ref });
+      this.logger?.debug(
+        `Outbound stream ${clip(ref)} errored at seq=${seq}: ${error.message} (${error.code})`,
+      );
+
+      await this.send({
+        kind: WireKind.RESPONSE,
+        type: ResponseMessageType.STREAM,
+        payload: {
+          event: "error",
+          ref,
+          seq,
+          error: toWireError(error, { correlationId: ref }),
+        },
+      } satisfies OmitStandardFields<StreamResponsePacket>).catch((reason: unknown) => {
+        this.logger?.warn(
+          `Failed to send stream error for ${clip(ref)}: ${reason instanceof Error ? reason.message : String(reason)}`,
+        );
+      });
+    } finally {
+      this.#streams.delete(ref);
+      this.logger?.trace(`Outbound stream ${clip(ref)} unregistered`);
+
+      // Best-effort close the source iterator on any exit path — errors,
+      // normal completion, or cancellation. `return()` is idempotent and
+      // safe to call on a drained generator.
+      if (typeof iterable.return === "function") {
+        void Promise.resolve(iterable.return(undefined)).catch(() => {
+          // observable
+        });
+      }
+    }
+  }
+
   private async handleResponsePacket(packet: AnyResponsePacket): Promise<void> {
     if (!packet.payload.ref) {
       // Protocol quirk rather than a real error — log and drop.
       this.logger?.debug(`Received response packet with no reference: ${clip(packet.id)}`);
+      return;
+    }
+
+    if (packet.type === ResponseMessageType.STREAM) {
+      const { ref, event } = packet.payload;
+
+      // route to the outbound stream registry rather than the
+      // pending-request map. The two sides of a stream never share state in `#pending`.
+      if (event === "credit") {
+        const outbound = this.#streams.get(ref);
+        if (!outbound) {
+          // Credit for a stream we don't know about (already completed or cancelled). Harmless.
+          this.logger?.debug(`Credit grant for unknown stream ${clip(ref)}: ${packet.id}`);
+          return;
+        }
+
+        outbound.credit += packet.payload.credit;
+        this.logger?.trace(
+          `Stream ${clip(ref)} received +${packet.payload.credit} credit (total=${outbound.credit})`,
+        );
+
+        // Wake the producer loop if it was blocked waiting for credit.
+        const waiter = outbound.waiter;
+        outbound.waiter = null;
+        if (waiter) waiter(true);
+        return;
+      }
+
+      const entry = this.#pending.get(ref) as PendingStreamRequest | undefined;
+      if (!entry) {
+        // Stale response — the local side already timed out, cancelled,
+        // or otherwise cleared the pending entry.
+        return;
+      }
+
+      switch (event) {
+        case "chunk": {
+          if (packet.payload.seq !== entry.seq) {
+            this.logger?.warn(
+              `Unexpected stream chunk sequence: expected ${entry.seq}, got ${packet.payload.seq} (${sizeof(packet.payload.chunk)} bytes)`,
+            );
+            return;
+          }
+
+          entry.seq++;
+          entry.credit.remaining--;
+          entry.queue.enqueue(packet.payload.chunk);
+
+          // Replenish credit when half the window is consumed.
+          if (entry.credit.remaining <= Math.floor(this.window / 2)) {
+            const grant = this.window - entry.credit.remaining;
+            entry.credit.remaining += grant;
+
+            this.logger?.trace(
+              `Stream ${clip(ref)} granting +${grant} credit (remaining=${entry.credit.remaining})`,
+            );
+
+            // Send the delta, not the absolute remaining, and bump the local view up.
+            void this.send({
+              kind: WireKind.RESPONSE,
+              type: ResponseMessageType.STREAM,
+              payload: { event: "credit", ref, credit: grant },
+            } satisfies OmitStandardFields<StreamResponsePacket>).catch((cause: unknown) => {
+              this.logger?.debug(
+                `Failed to send credit grant for stream ${clip(ref)}: ${cause instanceof Error ? cause.message : String(cause)}`,
+              );
+            });
+          }
+
+          break;
+        }
+
+        case "end": {
+          clearTimeout(entry.timer);
+          this.#pending.delete(ref);
+          this.outbound.exit();
+
+          // Gap detection: the producer reports the next seq it
+          // *would* have emitted. If our cursor doesn't match, a
+          // chunk was lost in transit.
+          if (packet.payload.seq !== entry.seq) {
+            this.logger?.warn(
+              `Stream ${clip(ref)} gap detected on end (expected=${entry.seq}, got=${packet.payload.seq})`,
+            );
+            entry.queue.fail(
+              new QuiryError(WireStatus.DATA_LOSS, "Stream ended with unexpected sequence (gap detected)", {
+                correlationId: ref,
+                detail: { expected: entry.seq, actual: packet.payload.seq },
+              }),
+            );
+          } else {
+            this.logger?.debug(`Stream ${clip(ref)} ended cleanly (${entry.seq} chunks received)`);
+            entry.queue.close();
+          }
+
+          break;
+        }
+
+        case "error": {
+          clearTimeout(entry.timer);
+          const error = fromWireError(packet.payload.error);
+          this.logger?.debug(
+            `Stream ${clip(ref)} errored at seq=${packet.payload.seq}: ${error.message} (${error.code})`,
+          );
+          entry.queue.fail(error);
+          this.#pending.delete(ref);
+          this.outbound.exit();
+
+          break;
+        }
+      }
+
       return;
     }
 
@@ -662,6 +1126,16 @@ export class Session extends EventEmitter<SessionEvents> {
     this.#pending.delete(ref);
     this.outbound.exit();
 
+    if (entry.kind === "stream") {
+      // User tried calling a stream method as a unary call.
+      return entry.queue.fail(
+        new QuiryError(status, "Cannot call a stream method as a unary call", {
+          correlationId: ref,
+          detail: { packetId: packet.id },
+        }),
+      );
+    }
+
     if (status === WireStatus.OK) entry.resolve(packet.payload.result);
     else {
       // Reconstruct the remote error with its full cause chain.
@@ -676,10 +1150,18 @@ export class Session extends EventEmitter<SessionEvents> {
 
   private rejectAllPending(error: Error): void {
     for (const request of this.#pending.values()) {
-      // if (request.timer) clearTimeout(request.timer);
-      request.reject(error);
+      if (request.kind === "call") request.reject(error);
+      else request.queue.fail(error);
     }
-    // this.#pending.clear();
+    this.#pending.clear();
+
+    // Abort any in-flight producer-side streams. This closes their source
+    // iterators (so generator `finally` blocks fire) and unblocks the loops
+    // waiting on credit, letting them exit cleanly.
+    for (const stream of this.#streams.values()) {
+      this.cancelOutboundStream(stream);
+    }
+    this.#streams.clear();
   }
 
   /** --------- INTERNALS: STATUS --------- */
@@ -696,6 +1178,7 @@ export class Session extends EventEmitter<SessionEvents> {
     return {
       state: this.#state,
       pending: this.#pending.size,
+      streams: this.#streams.size,
     };
   }
 

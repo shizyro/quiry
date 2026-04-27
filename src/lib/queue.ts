@@ -88,3 +88,76 @@ export class Queue<T> implements Iterable<T> {
     return result;
   }
 }
+
+export class AsyncQueue<T> extends Queue<T> implements AsyncIterableIterator<T> {
+  private closed = false;
+  private error: unknown = null;
+  private waiters: Array<{
+    resolve: (value: IteratorResult<T>) => void;
+    reject: (reason?: any) => void;
+  }> = [];
+
+  override enqueue(item: T): void {
+    if (this.closed) throw new Error("Queue is closed");
+
+    // If there are pending consumers, satisfy one immediately
+    if (this.waiters.length > 0) {
+      const { resolve } = this.waiters.shift()!;
+      resolve({ value: item, done: false });
+      return;
+    }
+
+    super.enqueue(item);
+  }
+
+  next(): Promise<IteratorResult<T>> {
+    if (this.length > 0) return Promise.resolve({ value: super.dequeue()!, done: false });
+    if (this.closed) {
+      return this.error ? Promise.reject(this.error) : Promise.resolve({ value: undefined, done: true });
+    }
+    return new Promise<IteratorResult<T>>((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
+    });
+  }
+
+  return(): Promise<IteratorResult<T>> {
+    this.close();
+    return Promise.resolve({ value: undefined, done: true });
+  }
+
+  throw(error?: any): Promise<IteratorResult<T>> {
+    const reason = error ?? new Error("Queue thrown");
+    this.fail(reason);
+    return Promise.reject(reason);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterableIterator<T> {
+    return this;
+  }
+
+  /**
+   * Gracefully close the queue. Pending `next()` waiters are resolved with
+   * `{done: true}`; any items still buffered remain consumable until drained.
+   */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+
+    for (const { resolve } of this.waiters) resolve({ value: undefined as any, done: true });
+    this.waiters = [];
+  }
+
+  /**
+   * Fail the queue with an error. Pending and future `next()` calls reject
+   * with the given error. Buffered items are discarded.
+   */
+  fail(error: unknown): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.error = error;
+
+    for (const { reject } of this.waiters) reject(error);
+    this.waiters = [];
+    super.clear();
+  }
+}

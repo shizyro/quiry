@@ -21,7 +21,7 @@ type WithRef<T = {}> = T & {
 
 /** --------- REQUEST PACKETS --------- */
 
-export const RequestMessageType = { CALL: "call", ABORT: "abort" } as const;
+export const RequestMessageType = { CALL: "call", ABORT: "abort", CANCEL: "cancel" } as const;
 export type RequestMessageType = (typeof RequestMessageType)[keyof typeof RequestMessageType];
 
 export type CallPayload = {
@@ -45,9 +45,15 @@ export type AbortPayload = WithRef<{}>;
 export interface AbortRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.ABORT, AbortPayload> {}
 
+export type CancelPayload = WithRef<{}>;
+
+/** A request to cancel an ongoing stream operation. */
+export interface CancelRequestPacket
+  extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.CANCEL, CancelPayload> {}
+
 /** --------- RESPONSE PACKETS --------- */
 
-export const ResponseMessageType = { VALUE: "value" } as const;
+export const ResponseMessageType = { VALUE: "value", STREAM: "stream" } as const;
 export type ResponseMessageType = (typeof ResponseMessageType)[keyof typeof ResponseMessageType];
 
 export type ValueResultPayload<TResult = unknown> = WithRef<{
@@ -65,7 +71,45 @@ export type ValueResponsePayload<TResult = unknown> = ValueResultPayload<TResult
 export interface ValueResponsePacket
   extends TypedWirePacket<typeof WireKind.RESPONSE, typeof ResponseMessageType.VALUE, ValueResponsePayload> {}
 
-/** --------- STREAM PACKETS --------- */
+export type StreamChunkPayload<TChunk = unknown> = WithRef<{
+  readonly seq: number;
+  readonly chunk: TChunk;
+}>;
+
+export type StreamCreditPayload = WithRef<{
+  /**
+   * Additional chunks the producer is permitted to send on top of whatever
+   * budget it already holds. Delta, not absolute: each grant extends the
+   * producer's remaining window by this amount.
+   */
+  readonly credit: number;
+}>;
+
+export type StreamEndPayload = WithRef<{
+  /** Expected next sequence number, for gap detection. */
+  readonly seq: number;
+}>;
+
+export type StreamErrorPayload = WithRef<{
+  readonly seq: number;
+  readonly error: WireError;
+}>;
+
+/** Single packet type, discriminated by the internal `event` property. */
+export type StreamResponsePayload<TChunk = unknown> =
+  | ({ readonly event: "chunk" } & StreamChunkPayload<TChunk>)
+  | ({ readonly event: "credit" } & StreamCreditPayload)
+  | ({ readonly event: "end" } & StreamEndPayload)
+  | ({ readonly event: "error" } & StreamErrorPayload);
+
+export interface StreamResponsePacket
+  extends TypedWirePacket<
+    typeof WireKind.RESPONSE,
+    typeof ResponseMessageType.STREAM,
+    StreamResponsePayload
+  > {}
+
+/** --------- SYSTEM PACKETS --------- */
 
 export const SystemMessageType = {
   HANDSHAKE: "handshake",
@@ -135,8 +179,8 @@ export type AnySystemPacket =
   | SystemDrainPacket
   | SystemDrainAckPacket;
 
-export type AnyRequestPacket = CallRequestPacket | AbortRequestPacket;
-export type AnyResponsePacket = ValueResponsePacket;
+export type AnyRequestPacket = CallRequestPacket | AbortRequestPacket | CancelRequestPacket;
+export type AnyResponsePacket = ValueResponsePacket | StreamResponsePacket;
 
 export type AnyPacket = AnySystemPacket | AnyRequestPacket | AnyResponsePacket;
 export type AnyTypedPacket = AnyPacket;
