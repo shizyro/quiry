@@ -15,6 +15,8 @@ export const WireKind = {
   REQUEST: "REQ",
   /** Responses, chunks, errors, and cancellations — all part of a request exchange. */
   RESPONSE: "RES",
+  /** A proxied function argument being invoked by the remote side. */
+  CALLBACK: "CBK",
   /** System-level messages; handshake, heartbeat, drain, peer discovery. */
   SYSTEM: "SYS",
 } as const;

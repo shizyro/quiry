@@ -7,8 +7,8 @@ import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
 /**
  * The full request surface lives on `Session.request`. These tests exercise it
- * end-to-end through a pair of in-memory sessions linked by `MockTransport`,
- * with a few low-level cases that bypass `openSessionPair` to drive states the
+ * end-to-end through a pair of in-memory sessions linked by a mock transport,
+ * with a few low-level cases that bypass the helper to drive states the
  * helper can't reach (peering, closed).
  */
 describe("Session requests", () => {
@@ -54,7 +54,7 @@ describe("Session requests", () => {
       });
 
       const traceId = "trace-abc" as unknown as TraceId;
-      await pair.consumer.request("s", "m", [], { traceId });
+      await pair.consumer.request("_", "_", [], { traceId });
 
       expect(captured).toBe("trace-abc");
     });
@@ -78,7 +78,7 @@ describe("Session requests", () => {
       });
 
       for (const value of fixtures) {
-        await expect(pair.consumer.request("s", "echo", [value])).resolves.toEqual(value);
+        await expect(pair.consumer.request("_", "echo", [value])).resolves.toEqual(value);
       }
     });
 
@@ -92,27 +92,23 @@ describe("Session requests", () => {
       });
 
       const values = Array.from({ length: 20 }, (_, i) => i);
-      const results = await Promise.all(values.map((v) => pair!.consumer.request("s", "double", [v])));
+      const results = await Promise.all(values.map((v) => pair!.consumer.request("_", "double", [v])));
 
       expect(results).toEqual(values.map((v) => v * 2));
     });
   });
 
   describe("argument validation", () => {
-    it("rejects with INVALID_ARGUMENT when args contain a function, symbol, or circular reference", async () => {
+    it("rejects with INVALID_ARGUMENT when args contain a symbol or circular reference", async () => {
       pair = await openSessionPair({});
 
-      await expect(pair.consumer.request("s", "m", [() => 1])).rejects.toMatchObject({
-        code: WireStatus.INVALID_ARGUMENT,
-      });
-
-      await expect(pair.consumer.request("s", "m", [Symbol("x")])).rejects.toMatchObject({
+      await expect(pair.consumer.request("_", "_", [Symbol("x")])).rejects.toMatchObject({
         code: WireStatus.INVALID_ARGUMENT,
       });
 
       const circular: Record<string, unknown> = {};
       circular.self = circular;
-      await expect(pair.consumer.request("s", "m", [circular])).rejects.toMatchObject({
+      await expect(pair.consumer.request("_", "_", [circular])).rejects.toMatchObject({
         code: WireStatus.INVALID_ARGUMENT,
       });
     });
@@ -121,7 +117,7 @@ describe("Session requests", () => {
       const inquiry = vi.fn<InquiryFunc>(async () => null);
       pair = await openSessionPair({ producerInquiry: inquiry });
 
-      await expect(pair.consumer.request("s", "m", [() => 1])).rejects.toBeInstanceOf(QuiryError);
+      await expect(pair.consumer.request("_", "_", [Symbol("x")])).rejects.toBeInstanceOf(QuiryError);
       // Give the wire a beat just in case something erroneously got dispatched.
       await new Promise((r) => setTimeout(r, 25));
       expect(inquiry).not.toHaveBeenCalled();
@@ -134,7 +130,7 @@ describe("Session requests", () => {
       const session = new Session(tA, {});
       // never opened — state is "peering"
 
-      const err = await session.request("s", "m", []).catch((e: unknown) => e);
+      const err = await session.request("_", "_", []).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(QuiryError);
       expect((err as QuiryError).code).toBe(WireStatus.UNAVAILABLE);
     });
@@ -147,7 +143,7 @@ describe("Session requests", () => {
       const drainPromise = pair.consumer.close();
       expect(pair.consumer.state).not.toBe("open");
 
-      await expect(pair.consumer.request("s", "m", [])).rejects.toMatchObject({
+      await expect(pair.consumer.request("_", "_", [])).rejects.toMatchObject({
         code: WireStatus.UNAVAILABLE,
       });
 
@@ -160,7 +156,7 @@ describe("Session requests", () => {
         producerInquiry: () => new Promise<never>(() => {}),
       });
 
-      const promise = pair.consumer.request("s", "m", [], {
+      const promise = pair.consumer.request("_", "_", [], {
         timeout: 60_000,
         retry: { maxAttempts: 0 },
       });
@@ -174,6 +170,7 @@ describe("Session requests", () => {
       await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED, message: "Session draining" });
       expect(pair.consumer.status.pending).toBe(0);
 
+      // Peer is gone, the DRAIN ACK will never arrive.
       void pair.close(true);
     });
   });
@@ -186,7 +183,7 @@ describe("Session requests", () => {
 
       const start = Date.now();
       const err = await pair.consumer
-        .request("s", "m", [], { timeout: 80, retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { timeout: 80, retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
       const elapsed = Date.now() - start;
 
@@ -204,7 +201,7 @@ describe("Session requests", () => {
         },
       });
 
-      await expect(pair.consumer.request("s", "m", [], { timeout: 500 })).resolves.toBe("ok");
+      await expect(pair.consumer.request("_", "_", [], { timeout: 500 })).resolves.toBe("ok");
     });
   });
 
@@ -222,7 +219,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("s", "m", [], { retry: { maxAttempts: 5, delay: 1 } }),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 5, delay: 1 } }),
       ).resolves.toBe("ok");
       expect(attempts).toBe(3);
     });
@@ -237,7 +234,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("s", "m", [], { retry: { maxAttempts: 5, delay: 1 } }),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 5, delay: 1 } }),
       ).rejects.toMatchObject({ code: WireStatus.INVALID_ARGUMENT });
       expect(attempts).toBe(1);
     });
@@ -252,7 +249,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("s", "m", [], { retry: { maxAttempts: 2, delay: 1 } }),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 2, delay: 1 } }),
       ).rejects.toMatchObject({
         code: WireStatus.UNAVAILABLE,
         message: "still down",
@@ -274,7 +271,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("s", "m", [], { retry: { maxAttempts: 1, delay: 60 } }),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 1, delay: 60 } }),
       ).rejects.toMatchObject({ code: WireStatus.UNAVAILABLE });
 
       expect(attempts).toBe(2);
@@ -294,8 +291,8 @@ describe("Session requests", () => {
 
       const ac = new AbortController();
       const promise = pair.consumer.request(
-        "s",
-        "m",
+        "_",
+        "_",
         [],
         {
           retry: { maxAttempts: 5, delay: 1000 },
@@ -323,8 +320,8 @@ describe("Session requests", () => {
 
       const ac = new AbortController();
       const promise = pair.consumer.request(
-        "s",
-        "m",
+        "_",
+        "_",
         [],
         {
           timeout: 60_000,
@@ -349,7 +346,7 @@ describe("Session requests", () => {
       });
 
       const ac = new AbortController();
-      await expect(pair.consumer.request("s", "m", [], {}, ac.signal)).resolves.toBe("done");
+      await expect(pair.consumer.request("_", "_", [], {}, ac.signal)).resolves.toBe("done");
 
       // The abort listener must have been detached when the request settled
       expect(() => ac.abort()).not.toThrow();
@@ -366,7 +363,7 @@ describe("Session requests", () => {
       ac.abort();
 
       await expect(
-        pair.consumer.request("s", "m", [], { retry: { maxAttempts: 0 } }, ac.signal),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 0 } }, ac.signal),
       ).rejects.toMatchObject({ code: WireStatus.ABORTED });
       expect(pair.consumer.status.pending).toBe(0);
     });
@@ -385,8 +382,8 @@ describe("Session requests", () => {
       const aborts = Array.from({ length: 10 }, () => new AbortController());
       const aborted = aborts.map((ac) =>
         pair!.consumer.request(
-          "s",
-          "m",
+          "_",
+          "_",
           ["hang"],
           {
             timeout: 60_000,
@@ -395,7 +392,7 @@ describe("Session requests", () => {
           ac.signal,
         ),
       );
-      const live = pair.consumer.request("s", "m", ["live"], {
+      const live = pair.consumer.request("_", "_", ["live"], {
         timeout: 60_000,
         retry: { maxAttempts: 0 },
       });
@@ -428,7 +425,7 @@ describe("Session requests", () => {
       });
 
       const err = await pair.consumer
-        .request("s", "m", [], { retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(QuiryError);
@@ -447,7 +444,7 @@ describe("Session requests", () => {
       });
 
       const err = await pair.consumer
-        .request("s", "m", [], { retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(QuiryError);
@@ -461,7 +458,7 @@ describe("Session requests", () => {
       });
 
       const err = await pair.consumer
-        .request("s", "m", [], { retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(QuiryError);
@@ -477,7 +474,7 @@ describe("Session requests", () => {
       });
 
       const err = await pair.consumer
-        .request("s", "m", [], { retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(QuiryError);
@@ -502,7 +499,7 @@ describe("Session requests", () => {
       producerNodeId = pair.consumer.peer;
 
       const err = await pair.consumer
-        .request("s", "m", [], { retry: { maxAttempts: 0 } })
+        .request("_", "_", [], { retry: { maxAttempts: 0 } })
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(QuiryError);

@@ -9,7 +9,7 @@ import { inspect } from "node:util";
 import { WireStatus, type WireError, type CorrelationId, type NodeId, type TraceId } from "@/interface/base";
 
 import { localNodeId } from "@/shared";
-import { isSerializable } from "@/lib/utils";
+import { isSerializable } from "@/lib/helpers";
 
 export type NonOkWireStatus = Exclude<WireStatus, typeof WireStatus.OK>;
 export type RetryableWireStatus =

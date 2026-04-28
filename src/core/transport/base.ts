@@ -10,7 +10,7 @@ import {
 } from ".";
 
 import { PacketQueue } from "./packet-queue";
-import { isWirePacket } from "@/lib/utils";
+import { isWirePacket } from "@/lib/helpers";
 
 const BACKPRESSURE_HIGH = 100; // packets
 const BACKPRESSURE_CRITICAL = 500;

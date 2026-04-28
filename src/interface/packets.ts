@@ -6,6 +6,8 @@ import type {
   CorrelationId,
   RequestControl,
   WireError,
+  InvocationId,
+  CallbackId,
 } from "./base";
 
 /** Typed wire packet with message type discrimination. */
@@ -14,9 +16,9 @@ export interface TypedWirePacket<TKind extends WireKind, TType extends string, T
   readonly type: TType;
 }
 
-type WithRef<T = {}> = T & {
+type WithRef<T = {}, Nullable extends boolean = false> = T & {
   /** Reference to the original invoke request packet. */
-  readonly ref: CorrelationId;
+  readonly ref: Nullable extends true ? CorrelationId | null : CorrelationId;
 };
 
 /** --------- REQUEST PACKETS --------- */
@@ -34,7 +36,7 @@ export type CallPayload = {
 export interface CallRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.CALL, CallPayload> {}
 
-export type AbortPayload = WithRef<{}>;
+export type AbortPayload = WithRef;
 
 /**
  * A packet sent by a client to abort an in-flight request.
@@ -45,7 +47,7 @@ export type AbortPayload = WithRef<{}>;
 export interface AbortRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.ABORT, AbortPayload> {}
 
-export type CancelPayload = WithRef<{}>;
+export type CancelPayload = WithRef;
 
 /** A request to cancel an ongoing stream operation. */
 export interface CancelRequestPacket
@@ -107,6 +109,47 @@ export interface StreamResponsePacket
     typeof WireKind.RESPONSE,
     typeof ResponseMessageType.STREAM,
     StreamResponsePayload
+  > {}
+
+/** --------- CALLBACK PACKETS --------- */
+
+export const CallbackMessageType = { INVOKE: "invoke", RETURN: "return", RELEASE: "release" } as const;
+export type CallbackMessageType = (typeof CallbackMessageType)[keyof typeof CallbackMessageType];
+
+export type CallbackInvokePayload = WithRef<{
+  readonly eid: InvocationId;
+  readonly callback: CallbackId;
+  readonly args: ReadonlyArray<unknown>;
+}>;
+
+export type CallbackReturnPayload = WithRef<{
+  readonly eid: InvocationId;
+  readonly callback: CallbackId;
+}> &
+  (
+    | { readonly status: typeof WireStatus.OK; readonly result: unknown }
+    | { readonly status: Exclude<WireStatus, typeof WireStatus.OK>; readonly error: WireError }
+  );
+
+export type CallbackReleasePayload = WithRef<{ readonly callbacks: ReadonlyArray<CallbackId> }, true>;
+
+export interface CallbackInvokePacket
+  extends TypedWirePacket<
+    typeof WireKind.CALLBACK,
+    typeof CallbackMessageType.INVOKE,
+    CallbackInvokePayload
+  > {}
+export interface CallbackReturnPacket
+  extends TypedWirePacket<
+    typeof WireKind.CALLBACK,
+    typeof CallbackMessageType.RETURN,
+    CallbackReturnPayload
+  > {}
+export interface CallbackReleasePacket
+  extends TypedWirePacket<
+    typeof WireKind.CALLBACK,
+    typeof CallbackMessageType.RELEASE,
+    CallbackReleasePayload
   > {}
 
 /** --------- SYSTEM PACKETS --------- */
@@ -178,11 +221,11 @@ export type AnySystemPacket =
   | SystemIdentifyAckPacket
   | SystemDrainPacket
   | SystemDrainAckPacket;
-
 export type AnyRequestPacket = CallRequestPacket | AbortRequestPacket | CancelRequestPacket;
 export type AnyResponsePacket = ValueResponsePacket | StreamResponsePacket;
+export type AnyCallbackPacket = CallbackInvokePacket | CallbackReturnPacket | CallbackReleasePacket;
 
-export type AnyPacket = AnySystemPacket | AnyRequestPacket | AnyResponsePacket;
+export type AnyPacket = AnySystemPacket | AnyRequestPacket | AnyResponsePacket | AnyCallbackPacket;
 export type AnyTypedPacket = AnyPacket;
 
 export type PacketByKind<K extends AnyPacket["kind"]> = Extract<AnyPacket, { kind: K }>;

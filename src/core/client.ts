@@ -1,6 +1,6 @@
 import EventEmitter from "node:events";
 
-import { Session, type OmitStandardFields } from "@/core/session";
+import { Session, normalized, type OmitStandardFields } from "@/core/session";
 import type { Transport } from "@/core/transport";
 
 import { WireKind, type RequestControl } from "@/interface/base";
@@ -8,6 +8,11 @@ import { SystemMessageType, type SystemIdentifyAckPacket } from "@/interface/pac
 import type { RemoteServiceDefinition, ServiceRegistry } from "@/interface/transformers";
 
 import { attachCallerStack, captureCallerStack } from "@/lib/errors";
+
+export type CallbackHandle<T extends Function> = T & {
+  release(): boolean;
+  [Symbol.dispose](): void;
+};
 
 export interface QuiryClientConfig {
   readonly name?: string;
@@ -110,6 +115,20 @@ export class QuiryClient<
         return dispatch;
       },
     });
+  }
+
+  /**
+   * Make a callback handle that can be manually released, or disposed out of scope.
+   * This is useful for long-lived callbacks, like event handlers.
+   */
+  callback<T extends Function>(fn: T): CallbackHandle<T> {
+    const stub = this.session.bind(fn);
+    const release = (): boolean => this.session.release(stub.id);
+    return Object.assign(fn, {
+      release,
+      [Symbol.dispose]: release,
+      [normalized]: stub,
+    }) as CallbackHandle<T>;
   }
 
   private route<T = unknown>(

@@ -8,19 +8,19 @@ import {
   type OmitStandardFields,
   type SessionState,
 } from "@/core/session";
-import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
-
-import { QuiryError } from "@/lib/errors";
-
 import {
   SystemMessageType,
   type SystemIdentifyAckPacket,
   type SystemIdentifyPacket,
 } from "@/interface/packets";
+
+import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
+import { QuiryError } from "@/lib/errors";
+
 import { WireKind, WireStatus, type NodeId } from "@/interface/base";
 import type { ServiceRegistry } from "@/interface/transformers";
 
-import { clip } from "@/lib/utils";
+import { clip } from "@/lib/helpers";
 
 export interface QuiryBrokerConfig {
   readonly identifyTimeout?: number;
@@ -76,12 +76,12 @@ export class QuiryBroker<
 
   /** --------- PUBLIC API: PEER MANAGEMENT --------- */
 
-  spawn(filename: string | URL, options: WorkerOptions = {}): Promise<PeerDescriptor> {
+  spawn(filename: string | URL, options: WorkerOptions = {}): Promise<PeerHandle> {
     const worker = new Worker(filename, options);
     return this.attach(worker);
   }
 
-  async attach(worker: Worker): Promise<PeerDescriptor> {
+  async attach(worker: Worker): Promise<PeerHandle> {
     const transport = new WorkerThreadsTransport({ worker });
     const session = await new Session(
       transport,
@@ -121,16 +121,20 @@ export class QuiryBroker<
 
     this.peers.set(peerId, handle);
 
-    session.once("close", () => {
-      if (this.peers.delete(peerId)) {
-        this.emit("peer-removed", handle);
-        this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) disconnected`);
-      }
-    });
+    session.on(
+      "close",
+      () => {
+        if (this.peers.delete(peerId)) {
+          this.emit("peer-removed", handle);
+          this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) disconnected`);
+        }
+      },
+      { once: true },
+    );
 
     this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) attached`);
     this.emit("peer-added", handle);
-    return handle.descriptor;
+    return handle;
   }
 
   private async identify(session: Session): Promise<SystemIdentifyAckPacket> {
