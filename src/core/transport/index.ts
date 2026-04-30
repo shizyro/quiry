@@ -6,8 +6,11 @@ export type BackpressureState = "ok" | "high" | "critical";
 export interface BackpressureSignal {
   readonly state: BackpressureState;
   readonly depth: number;
-  readonly bytes?: number; // absent for structured transports
 }
+
+export type BackpressureSnapshot = BackpressureSignal & {
+  readonly updatedAt: number;
+};
 
 export interface TransportOptions {
   // Nothing here, yet.

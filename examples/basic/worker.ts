@@ -49,7 +49,7 @@ async function main() {
 
     // ...
   })()
-    .then(() => client.session.close())
+    .then(() => client.shutdown())
     .catch(console.error);
 }
 

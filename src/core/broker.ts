@@ -1,4 +1,5 @@
 import EventEmitter from "node:events";
+
 import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 import { fork, type ForkOptions } from "node:child_process";
 
@@ -15,70 +16,62 @@ import {
   type SystemIdentifyPacket,
 } from "@/interface/packets";
 
-import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
-import { QuiryError } from "@/lib/errors";
+import type { BackpressureSnapshot, Transport } from "./transport";
+import { WorkerThreadsTransport } from "./transport/worker-threads";
+import { ChildProcessTransport } from "./transport/child-process";
 
 import { HeartbeatStatus, WireKind, WireStatus, type MetricsData, type NodeId } from "@/interface/base";
 import type { ServiceRegistry } from "@/interface/transformers";
 
+import { QuiryError } from "@/lib/errors";
 import { clip } from "@/lib/helpers";
-import type { Transport } from "./transport";
-import { ChildProcessTransport } from "./transport/child-process";
 
 export interface PeerHandle {
-  // readonly port: NJSWorker | ChildProcess;
-  readonly descriptor: PeerDescriptor;
+  readonly id: NodeId;
+  readonly label?: string;
   readonly session: Session;
   readonly info: PeerInfo;
 }
 
-export interface PeerDescriptor {
-  readonly id: NodeId;
-  readonly label?: string;
-  readonly version?: string;
-  readonly metadata?: Record<string, string | number | boolean>;
-}
-
 export interface PeerInfo {
   readonly health: PeerHealth;
-  readonly heartbeat: {
-    missed: number;
-    last: number;
-  };
+  readonly heartbeat: { missed: number; last: number };
+  readonly connectedAt: number;
+  readonly lastActivity: number;
+  readonly backpressure: BackpressureSnapshot;
 }
 
 export interface PeerHealth {
   readonly status: HeartbeatStatus;
   readonly updatedAt: number;
   readonly metrics?: MetricsData;
-  readonly errors?: readonly string[];
 }
 
 export interface BrokerConfig {
-  readonly defaultSessionConfig?: SessionConfig;
+  readonly label?: string;
+  readonly session?: SessionConfig;
   readonly identifyTimeout?: number;
   readonly heartbeat?: {
     readonly interval?: number;
     readonly timeout?: number;
     readonly maxMissed?: number;
-    readonly monitorInterval?: number;
+    readonly checkInterval?: number;
   };
-  // ...
 }
 
 export interface BrokerEvents {
   "peer-connected": [handle: PeerHandle];
-  "peer-disconnected": [handle: PeerHandle];
-  "peer-health-changed": [handle: PeerHandle, health: PeerHealth];
+  "peer-disconnected": [handle: PeerHandle, reason?: string];
+  "peer-health": [handle: PeerHandle, prev: HeartbeatStatus];
   shutdown: [reason?: string];
+  error: [error: Error];
 }
 
 export class Broker<TServices extends ServiceRegistry> extends EventEmitter<BrokerEvents> {
-  private readonly config: DeepRequired<Omit<BrokerConfig, "defaultSessionConfig">> &
-    Pick<BrokerConfig, "defaultSessionConfig">;
+  private readonly config: DeepRequired<Omit<BrokerConfig, "session">> & Pick<BrokerConfig, "session">;
 
   private readonly services = new Map<keyof TServices, object>();
-  private readonly peers = new Map<NodeId, PeerHandle>();
+  private readonly workers = new Map<NodeId, PeerHandle>();
 
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #isShuttingDown: boolean = false;
@@ -90,15 +83,23 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     super();
 
     this.config = {
-      defaultSessionConfig: config.defaultSessionConfig ?? {},
+      label: config.label ?? "broker",
+      session: config.session ?? {},
       identifyTimeout: config.identifyTimeout ?? 10_000,
       heartbeat: {
         interval: config.heartbeat?.interval ?? 10_000,
         timeout: config.heartbeat?.timeout ?? 5000,
         maxMissed: config.heartbeat?.maxMissed ?? 3,
-        monitorInterval: config.heartbeat?.monitorInterval ?? 15_000,
+        checkInterval: config.heartbeat?.checkInterval ?? 15_000,
       },
-      // ...
+    };
+  }
+
+  get status(): BrokerStatus {
+    return {
+      peers: this.workers.size,
+      services: Array.from(this.services.keys()) as string[],
+      inflight: { calls: 0, streams: 0 }, // TODO: count inflight calls and streams
     };
   }
 
@@ -118,7 +119,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     const session = await new Session(
       transport,
       this.inquiry.bind(this),
-      this.config.defaultSessionConfig,
+      this.config.session,
       this.logger,
     ).open();
 
@@ -131,7 +132,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
       throw error;
     });
 
-    if (this.peers.has(peerId)) {
+    if (this.workers.has(peerId)) {
       // Await the close so the transport is actually gone before the caller observes the error.
       await session.close().catch(() => null);
       throw new QuiryError(WireStatus.FAILED_PRECONDITION, `Worker with id ${peerId} already registered`, {
@@ -140,34 +141,30 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     }
 
     const now = Date.now();
-    const handle = {
-      descriptor: {
-        id: peerId,
-        label: payload.label,
-        version: payload.version,
-        metadata: payload.metadata,
-      },
+    const handle: PeerHandle = {
+      id: peerId,
+      label: payload.label,
       session,
       info: {
+        connectedAt: now,
+        lastActivity: now,
+        backpressure: { state: "ok", depth: 0, updatedAt: now },
+        heartbeat: { missed: 0, last: now },
         health: {
           status: HeartbeatStatus.HEALTHY,
           updatedAt: now,
         },
-        heartbeat: {
-          missed: 0,
-          last: now,
-        },
       },
-    } satisfies PeerHandle;
+    };
 
-    this.peers.set(peerId, handle);
+    this.workers.set(peerId, handle);
 
     session.on(
-      "close",
-      () => {
-        if (this.peers.delete(peerId)) {
-          this.emit("peer-disconnected", handle);
-          this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) disconnected`);
+      "terminate",
+      (reason?: string) => {
+        if (this.workers.delete(peerId)) {
+          this.emit("peer-disconnected", handle, reason);
+          this.logger?.info(`Worker ${peerId}(${handle.label ?? "unknown"}) disconnected`);
         }
       },
       { once: true },
@@ -189,7 +186,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
         Object.assign(handle.info.health, { status, updatedAt: now, metrics });
         if (previousStatus !== status) {
           this.logger?.warn(`Worker ${peerId} heartbeat status changed from ${previousStatus} to ${status}`);
-          this.emit("peer-health-changed", handle, handle.info.health);
+          this.emit("peer-health", handle, previousStatus);
         }
 
         this.logger?.debug(`Heartbeat received from worker ${peerId} [${now - timestamp}ms]`, {
@@ -199,7 +196,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
       },
     );
 
-    this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) attached`);
+    this.logger?.info(`Worker ${peerId}(${handle.label ?? "unknown"}) attached`);
     this.emit("peer-connected", handle);
 
     if (!this.#heartbeatTimer) this.startHeartbeatMonitor();
@@ -235,19 +232,27 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
 
   async detach(id: string | number | NodeId, kill: boolean = false): Promise<void> {
     const peerId = String(id) as NodeId;
-    const handle = this.peers.get(peerId);
+    const handle = this.workers.get(peerId);
     if (!handle) return;
 
-    await handle.session.close(kill);
-    this.peers.delete(peerId);
+    await handle.session.close("detached", !kill);
+    this.workers.delete(peerId);
 
-    this.logger?.info(`Worker ${peerId}(${handle.descriptor.label ?? "unknown"}) detached`);
+    this.logger?.info(`Worker ${peerId}(${handle.label ?? "unknown"}) detached`);
     this.emit("peer-disconnected", handle);
 
-    if (this.peers.size === 0 && this.#heartbeatTimer) {
+    if (this.workers.size === 0 && this.#heartbeatTimer) {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
     }
+  }
+
+  peer(id: string | number | NodeId): PeerHandle | undefined {
+    return this.workers.get(String(id) as NodeId);
+  }
+
+  peers(): IterableIterator<PeerHandle> {
+    return this.workers.values();
   }
 
   /** --------- PUBLIC API: SERVICES --------- */
@@ -271,11 +276,9 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     return this;
   }
 
-  async shutdown(graceful: boolean = true): Promise<void> {
+  async shutdown(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#isShuttingDown) return;
     this.#isShuttingDown = true;
-
-    this.logger?.info("Starting shutdown sequence");
 
     const start = Date.now();
     if (this.#heartbeatTimer) {
@@ -285,15 +288,15 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
       this.logger?.debug("Heartbeat monitor stopped");
     }
 
-    for (const peer of this.peers.values()) {
-      await peer.session.close(!graceful);
-      this.logger?.debug(`Worker ${peer.descriptor.id}(${peer.descriptor.label ?? "unknown"}) closed`);
+    for (const peer of this.workers.values()) {
+      await peer.session.close(reason, graceful);
+      this.logger?.debug(`Worker ${peer.id}(${peer.label ?? "unknown"}) closed`);
     }
 
-    this.peers.clear();
+    this.workers.clear();
     this.services.clear();
 
-    this.emit("shutdown");
+    this.emit("shutdown", reason);
     this.logger?.info(`Broker shutdown complete in ${Date.now() - start}ms`);
   }
 
@@ -335,7 +338,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
   private startHeartbeatMonitor(): void {
     this.#heartbeatTimer = setInterval(() => {
       const now = Date.now();
-      for (const [peerId, handle] of this.peers.entries()) {
+      for (const [peerId, handle] of this.workers.entries()) {
         const timeSinceLastHeartbeat = now - handle.info.heartbeat.last;
         if (timeSinceLastHeartbeat > this.config.heartbeat.timeout) {
           handle.info.heartbeat.missed++;
@@ -345,10 +348,10 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
             this.logger?.error(
               `Worker ${peerId} heartbeat missed ${this.config.heartbeat.maxMissed} times, detaching`,
             );
-            void handle.session.close(true);
-            this.peers.delete(peerId);
+            void handle.session.close("degraded", true);
+            this.workers.delete(peerId);
 
-            this.emit("peer-disconnected", handle);
+            this.emit("peer-disconnected", handle, "heartbeat missed");
             continue;
           }
 
@@ -359,7 +362,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
             this.logger?.warn(
               `Worker ${peerId} heartbeat degraded from ${previousStatus} to ${HeartbeatStatus.DEGRADED}`,
             );
-            this.emit("peer-health-changed", handle, handle.info.health);
+            this.emit("peer-health", handle, previousStatus);
           }
 
           this.logger?.debug(
@@ -367,8 +370,15 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
           );
         }
       }
-    }, this.config.heartbeat.monitorInterval);
+    }, this.config.heartbeat.checkInterval);
 
-    this.logger?.debug(`Heartbeat monitor started with interval ${this.config.heartbeat.monitorInterval}ms`);
+    this.logger?.debug(`Heartbeat monitor started with interval ${this.config.heartbeat.checkInterval}ms`);
   }
+}
+
+export interface BrokerStatus {
+  readonly peers: number;
+  readonly services: ReadonlyArray<string>;
+  readonly inflight: { calls: number; streams: number };
+  // ...
 }

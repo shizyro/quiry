@@ -173,15 +173,14 @@ export type HandshakePayload = {
 };
 
 export type IdentifyPayload = {
+  readonly label?: string;
   /** The interval at which the peer is expected to send heartbeats. */
   readonly heartbeatInterval?: number;
 };
 
 export type IdentifyAckPayload = WithRef<{
   readonly label?: string;
-  readonly version?: string;
-  readonly metadata?: Record<string, string | number | boolean>;
-  // These are probably needed at some point in the future...
+  // Might need to add more fields here...
 }>;
 
 export type HeartbeatPayload = {
@@ -191,7 +190,7 @@ export type HeartbeatPayload = {
 
 export type DrainPayload = {
   readonly reason?: string;
-  readonly graceful?: boolean;
+  readonly timeout?: number;
 };
 
 export type DrainAckPayload = WithRef<{

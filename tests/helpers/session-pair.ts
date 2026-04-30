@@ -34,13 +34,13 @@ export async function openSessionPair(options: {
   return {
     producer,
     consumer,
-    close: async (force: boolean = false) => {
+    close: async (graceful: boolean = true) => {
       // Close sequentially so each session transitions to its own
       // "closed" state before its transport emits the state-change
       // event — avoids the session interpreting its own close as a
       // peer-initiated crash.
-      await producer.close(force).catch(() => {});
-      await consumer.close(force).catch(() => {});
+      await producer.close("explicit", graceful).catch(() => {});
+      await consumer.close("explicit", graceful).catch(() => {});
     },
   };
 }

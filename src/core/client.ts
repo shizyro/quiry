@@ -10,7 +10,14 @@ import {
 } from "@/core/session";
 import type { Transport } from "@/core/transport";
 
-import { HeartbeatStatus, WireKind, WireStatus, type RequestControl } from "@/interface/base";
+import {
+  HeartbeatStatus,
+  WireKind,
+  WireStatus,
+  type MetricsData,
+  type NodeId,
+  type RequestControl,
+} from "@/interface/base";
 import { SystemMessageType, type SystemIdentifyAckPacket } from "@/interface/packets";
 import type { RemoteServiceDefinition, ServiceRegistry } from "@/interface/transformers";
 
@@ -22,24 +29,32 @@ export type CallbackHandle<T extends Function> = T & {
   [Symbol.dispose](): void;
 };
 
+export interface HostHandle {
+  readonly id: NodeId;
+  readonly label?: string;
+  readonly session: Session;
+  readonly connectedAt: number;
+}
+
 export interface WorkerConfig {
-  readonly name?: string;
-  readonly version?: string;
-  readonly metadata?: Record<string, string | number | boolean>;
-  readonly defaultSessionConfig?: SessionConfig;
+  readonly label?: string;
+  readonly session?: SessionConfig;
+  readonly heartbeat?: {
+    readonly intervalOverride?: number;
+    readonly metrics?: () => Partial<MetricsData> | Promise<Partial<MetricsData>>;
+  };
 }
 
 export interface WorkerEvents {
-  connected: [];
-  disconnected: [];
+  "host-connected": [host: HostHandle];
+  "host-disconnected": [host: HostHandle, reason?: string];
   shutdown: [reason?: string];
+  error: [error: Error];
 }
 
 export class Worker<TServices extends ServiceRegistry> extends EventEmitter<WorkerEvents> {
-  readonly session: Session;
-  private readonly config: DeepRequired<Omit<WorkerConfig, "defaultSessionConfig">> &
-    Pick<WorkerConfig, "defaultSessionConfig">;
-
+  private readonly session: Session;
+  private readonly config: DeepRequired<Omit<WorkerConfig, "session">> & Pick<WorkerConfig, "session">;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #isShuttingDown: boolean = false;
 
@@ -50,12 +65,38 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
   ) {
     super();
 
-    this.session = new Session(transport, this.inquiry.bind(this), config.defaultSessionConfig, this.logger);
+    this.session = new Session(transport, this.inquiry.bind(this), config.session, this.logger);
     this.config = {
-      name: config.name ?? "worker",
-      version: config.version ?? "0.0.1",
-      metadata: config.metadata ?? {},
-      defaultSessionConfig: config.defaultSessionConfig ?? {},
+      label: config.label ?? "worker",
+      session: config.session ?? {},
+      heartbeat: {
+        intervalOverride: config.heartbeat?.intervalOverride ?? 30_000,
+        metrics:
+          config.heartbeat?.metrics ??
+          (() => ({
+            memory: getMemoryUsage(),
+            cpu: { usage: process.cpuUsage() },
+            uptime: process.uptime(),
+          })),
+      },
+    };
+  }
+
+  get host(): HostHandle | null {
+    return this.session.peer
+      ? {
+          id: this.session.peer,
+          label: this.config.label,
+          session: this.session,
+          connectedAt: this.session.connectedAt,
+        }
+      : null;
+  }
+
+  get status(): WorkerStatus {
+    return {
+      host: this.session.peer,
+      // ...
     };
   }
 
@@ -64,14 +105,14 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     this.logger?.info(`Worker opened for ${this.session}`);
 
     this.session.on(
-      "close",
+      "terminate",
       () => {
         if (this.#heartbeatTimer) {
           clearInterval(this.#heartbeatTimer);
           this.#heartbeatTimer = null;
         }
 
-        this.emit("disconnected");
+        this.emit("host-disconnected", this.host!, "session terminated");
       },
       { once: true },
     );
@@ -87,15 +128,13 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
             type: SystemMessageType.IDENTIFY_ACK,
             payload: {
               ref: feedback.id,
-              label: this.config.name,
-              version: this.config.version,
-              metadata: this.config.metadata,
+              label: this.config.label,
             },
           } satisfies OmitStandardFields<SystemIdentifyAckPacket>)
           .finally(() => this.startPeriodicHeartbeat(feedback.payload.heartbeatInterval));
       });
 
-    this.emit("connected");
+    this.emit("host-connected", this.host!);
     return this;
   }
 
@@ -158,7 +197,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     }) as CallbackHandle<T>;
   }
 
-  async shutdown(graceful: boolean = true): Promise<void> {
+  async shutdown(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#isShuttingDown) return;
     this.#isShuttingDown = true;
     const start = Date.now();
@@ -168,9 +207,9 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
       this.#heartbeatTimer = null;
     }
 
-    await this.session.close(!graceful);
+    await this.session.close(reason, graceful);
 
-    this.emit("shutdown");
+    this.emit("shutdown", reason);
     this.logger?.info(`Worker shutdown complete in ${Date.now() - start}ms`);
   }
 
@@ -262,7 +301,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     throw new QuiryError(WireStatus.UNIMPLEMENTED, "Worker inquiry not implemented");
   }
 
-  private startPeriodicHeartbeat(interval: number = 30_000): void {
+  private startPeriodicHeartbeat(interval: number = this.config.heartbeat.intervalOverride): void {
     if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer);
     this.#heartbeatTimer = setInterval(async () => {
       if (!this.session.isConnected()) return;
@@ -273,11 +312,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
           type: SystemMessageType.HEARTBEAT,
           payload: {
             status: HeartbeatStatus.HEALTHY,
-            metrics: {
-              memory: getMemoryUsage(),
-              cpu: { usage: process.cpuUsage() },
-              uptime: process.uptime(),
-            },
+            metrics: await this.config.heartbeat?.metrics?.(),
           },
         });
       } catch (error: unknown) {
@@ -289,6 +324,11 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
 
     this.logger?.debug(`Heartbeat started with interval ${interval}ms`);
   }
+}
+
+export interface WorkerStatus {
+  readonly host: NodeId | null;
+  // ...
 }
 
 /**

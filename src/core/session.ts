@@ -1,6 +1,6 @@
 import EventEmitter from "node:events";
 
-import type { Transport, TransportError } from "@/core/transport";
+import type { BackpressureSignal, Transport, TransportError } from "@/core/transport";
 import {
   WireKind,
   WireStatus,
@@ -46,18 +46,11 @@ import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } 
 import { nanoid } from "nanoid";
 import { isSerializable, clip } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
+import { InFlightTracker } from "@/lib/tracker";
 import sizeof from "object-sizeof";
 
 import { threadId } from "node:worker_threads";
 import { localNodeId } from "@/shared";
-
-export type SessionState = "peering" | "open" | "draining" | "closed";
-
-export interface SessionConfig {
-  readonly handshakeTimeout?: number;
-  readonly defaultTimeout?: number;
-  readonly drainTimeout?: number;
-}
 
 export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
 
@@ -139,11 +132,20 @@ interface PendingCallbackInvocation<T = unknown> {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+export type SessionState = "peering" | "open" | "draining" | "closed";
+
+export interface SessionConfig {
+  readonly handshakeTimeout?: number;
+  readonly defaultTimeout?: number;
+  readonly drainTimeout?: number;
+  readonly creditWindow?: number;
+}
+
 export interface SessionEvents {
-  "state-change": [state: SessionState];
-  handshake: [metadata: HandshakePayload];
+  "state-change": [next: SessionState, prev: SessionState];
+  handshake: [peer: NodeId, metadata: HandshakePayload];
+  terminate: [reason?: string];
   error: [error: Error];
-  close: [reason?: string];
 }
 
 export class Session<Ready extends boolean = boolean> {
@@ -151,6 +153,7 @@ export class Session<Ready extends boolean = boolean> {
 
   #peer: NodeId | null = null;
   #state: SessionState = "peering";
+  #connectedAt: number = -1;
 
   private readonly config: Required<SessionConfig>;
   private readonly router: Router<AnyPacket>;
@@ -168,7 +171,6 @@ export class Session<Ready extends boolean = boolean> {
 
   readonly #controllers = new Map<CorrelationId, AbortController>();
   /** The number of chunks to prefetch for each streaming request. */
-  readonly #credit_window: number = 100;
 
   constructor(
     private readonly transport: Transport,
@@ -181,6 +183,7 @@ export class Session<Ready extends boolean = boolean> {
       handshakeTimeout: config.handshakeTimeout ?? 10_000,
       defaultTimeout: config.defaultTimeout ?? 10_000,
       drainTimeout: config.drainTimeout ?? 5000,
+      creditWindow: config.creditWindow ?? 100,
     };
   }
 
@@ -205,8 +208,9 @@ export class Session<Ready extends boolean = boolean> {
 
   private transition(state: SessionState): void {
     if (this.#state === state) return;
+    const prev = this.#state;
     this.#state = state;
-    this.emitter.emit("state-change", state);
+    this.emitter.emit("state-change", state, prev);
 
     this.logger?.debug(`Session state changed to ${state.toUpperCase()}`);
   }
@@ -251,20 +255,19 @@ export class Session<Ready extends boolean = boolean> {
     });
     this.transition("open");
 
-    this.logger?.info(`Session established ${localNodeId} <-> ${this.#peer}`);
+    this.logger?.info(`Established session with peer ${this.#peer}`);
     return this;
   }
 
-  async close(force: boolean = false): Promise<void> {
+  async close(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#state === "closed") return;
-    if (force || this.#state === "peering") return await this.terminate();
-    return (this.#drain_promise ??= this.performDrain("local"));
+    if (!graceful || this.#state === "peering") return await this.terminate();
+    return (this.#drain_promise ??= this.performDrain("local", reason));
   }
 
   /** --------- INTERNALS: LIFECYCLE --------- */
 
   private async performHandshake(): Promise<void> {
-    this.logger?.debug(`Performing handshake on node ${localNodeId}`);
     const id = await this.forward({
       id: nanoid() as CorrelationId,
       kind: WireKind.SYSTEM,
@@ -273,7 +276,7 @@ export class Session<Ready extends boolean = boolean> {
       payload: { nodeId: localNodeId, threadId: threadId, pid: process.pid },
     } satisfies SystemHandshakePacket);
 
-    this.logger?.trace(`Waiting for handshake response (${clip(id)})`);
+    this.logger?.trace(`Awaiting handshake response to (${clip(id)})`);
     // Manually wait for the handshake response instead of using the router since
     // the session shouldn't be able to read any packets before the handshake is complete.
     const feedback = await new Promise<SystemHandshakePacket>((resolve, reject) => {
@@ -301,9 +304,10 @@ export class Session<Ready extends boolean = boolean> {
     });
 
     this.#peer = feedback.payload.nodeId;
-    this.logger?.debug(`Handshake completed with node ${this.#peer}`);
+    this.#connectedAt = Date.now();
+    this.logger?.debug(`Handshake completed with peer ${this.#peer}`);
 
-    this.emitter.emit("handshake", feedback.payload);
+    this.emitter.emit("handshake", this.#peer, feedback.payload);
   }
 
   /**
@@ -326,12 +330,16 @@ export class Session<Ready extends boolean = boolean> {
    * A `DRAIN` arriving after we've already quiesced is ACKed inline by
    * the handler, so a late-arriving peer DRAIN can't miss the ACK window.
    */
-  private async performDrain(initiator: "local" | "remote"): Promise<void> {
+  private async performDrain(
+    initiator: "local" | "remote",
+    reason: string = "explicit",
+    timeout: number = this.config.drainTimeout,
+  ): Promise<void> {
     if (this.#state === "closed") return;
     if (this.#state !== "draining") this.transition("draining");
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.drainTimeout);
+    const timer = setTimeout(() => controller.abort(), timeout);
 
     // Short-circuit the drain the moment the transport dies under us.
     this.transport.on("state-change", (next) => next === "closed" && controller.abort());
@@ -344,7 +352,7 @@ export class Session<Ready extends boolean = boolean> {
         await this.send({
           kind: WireKind.SYSTEM,
           type: SystemMessageType.DRAIN,
-          payload: { reason: "explicit", graceful: true },
+          payload: { reason, timeout },
         } satisfies OmitStandardFields<SystemDrainPacket>).catch(() => null);
       }
 
@@ -407,7 +415,7 @@ export class Session<Ready extends boolean = boolean> {
                 (p) => p.kind === WireKind.SYSTEM && p.type === SystemMessageType.DRAIN_ACK,
                 { signal: controller.signal },
               )
-              .then(({ id }) => this.logger?.debug(`Received DRAIN_ACK ${clip(id)} from remote peer`))
+              .then(({ id }) => this.logger?.debug(`Received DRAIN_ACK (${clip(id)}) from remote peer`))
               .catch(() => null) // aborted by signal; teardown anyway
           : Promise.resolve();
 
@@ -429,17 +437,13 @@ export class Session<Ready extends boolean = boolean> {
       initiator === "local" && this.logger?.debug("Drain interrupted or timed out; proceeding to teardown");
     } finally {
       clearTimeout(timer);
-      await this.terminate();
+      await this.terminate(reason);
     }
   }
 
-  private async terminate(): Promise<void> {
-    this.teardown();
-    await this.transport.close().catch(() => null);
-  }
-
-  private teardown(): void {
+  private async terminate(reason?: string): Promise<void> {
     if (this.#state === "closed") return;
+    const prev = this.#state;
     this.#state = "closed";
 
     // Stop the router; any waiters still pending get rejected with
@@ -457,8 +461,10 @@ export class Session<Ready extends boolean = boolean> {
     this.callbacks.clear();
     this.#inflight_invocations.clear();
 
-    this.emitter.emit("state-change", "closed");
-    this.emitter.emit("close");
+    this.emitter.emit("state-change", "closed", prev);
+    this.emitter.emit("terminate", reason);
+
+    void this.transport.close().catch(() => null);
   }
 
   /** --------- PUBLIC API: REQUESTS & CALLBACKS --------- */
@@ -617,11 +623,11 @@ export class Session<Ready extends boolean = boolean> {
     // chunks arriving before the CALL `.then` callback still decrement the
     // right counter (producer cannot start until it sees the credit grant,
     // but other incoming packets are routed concurrently).
-    const credit = { remaining: this.#credit_window };
+    const credit = { remaining: this.config.creditWindow };
     const context = { correlationId: correlation, traceId: control?.traceId };
 
     this.logger?.debug(
-      `Opening stream ${clip(correlation)} to ${service}.${method} (window=${this.#credit_window})`,
+      `Opening stream ${clip(correlation)} to ${service}.*${method} with a window of ${this.config.creditWindow}`,
     );
 
     const entry: PendingStreamRequest = { kind: "stream", queue, credit, seq: 0 };
@@ -663,12 +669,10 @@ export class Session<Ready extends boolean = boolean> {
         await this.send({
           kind: WireKind.RESPONSE,
           type: ResponseMessageType.STREAM,
-          payload: { event: "credit", ref: correlation, credit: this.#credit_window },
+          payload: { event: "credit", ref: correlation, credit: this.config.creditWindow },
         } satisfies OmitStandardFields<StreamResponsePacket>);
 
-        this.logger?.trace(
-          `Stream ${clip(correlation)} initial credit grant sent (credit=${this.#credit_window})`,
-        );
+        this.logger?.trace(`Stream ${clip(correlation)} initial credit grant sent`);
       } catch (cause: unknown) {
         this.logger?.warn(
           `Failed to initiate stream ${clip(correlation)}: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -800,7 +804,7 @@ export class Session<Ready extends boolean = boolean> {
    * callback registry. Public because tests need a non-polling way to
    * assert the registry's contents without reaching through `status`.
    */
-  hasCallback(id: CallbackId): boolean {
+  callable(id: CallbackId): boolean {
     return this.callbacks.get(id) !== undefined;
   }
 
@@ -883,7 +887,11 @@ export class Session<Ready extends boolean = boolean> {
         // Remote-initiated drain: run the same coroutine, just without
         // the "announce" step. Our terminal ACK will fire once we
         // quiesce.
-        void (this.#drain_promise ??= this.performDrain("remote"));
+        void (this.#drain_promise ??= this.performDrain(
+          "remote",
+          packet.payload.reason,
+          packet.payload.timeout,
+        ));
 
         break;
       }
@@ -902,8 +910,8 @@ export class Session<Ready extends boolean = boolean> {
       const outbound = this.#outbound_streams.get(packet.payload.ref);
       if (!outbound) return;
 
-      this.logger?.debug(`Cancelling outbound stream ${clip(packet.payload.ref)}`);
       this.cancelOutboundStream(outbound);
+      this.logger?.debug(`Cancelled outbound stream ${clip(packet.payload.ref)}`);
       return;
     }
 
@@ -1031,7 +1039,7 @@ export class Session<Ready extends boolean = boolean> {
   private async handleResponsePacket(packet: AnyResponsePacket): Promise<void> {
     if (!packet.payload.ref) {
       // Protocol quirk rather than a real error — log and drop.
-      this.logger?.debug(`Received response packet with no reference: ${clip(packet.id)}`);
+      this.logger?.trace(`Received response packet with no reference: ${clip(packet.id)}`);
       return;
     }
 
@@ -1044,7 +1052,7 @@ export class Session<Ready extends boolean = boolean> {
         const outbound = this.#outbound_streams.get(ref);
         if (!outbound) {
           // Credit for a stream we don't know about (already completed or cancelled). Harmless.
-          this.logger?.debug(`Credit grant for unknown stream ${clip(ref)}: ${packet.id}`);
+          this.logger?.trace(`Credit grant for unknown stream ${clip(ref)}: ${packet.id}`);
           return;
         }
 
@@ -1081,13 +1089,9 @@ export class Session<Ready extends boolean = boolean> {
           entry.queue.enqueue(packet.payload.chunk);
 
           // Replenish credit when half the window is consumed.
-          if (entry.credit.remaining <= Math.floor(this.#credit_window / 2)) {
-            const grant = this.#credit_window - entry.credit.remaining;
+          if (entry.credit.remaining <= Math.floor(this.config.creditWindow / 2)) {
+            const grant = this.config.creditWindow - entry.credit.remaining;
             entry.credit.remaining += grant;
-
-            this.logger?.trace(
-              `Stream ${clip(ref)} granting +${grant} credit (remaining=${entry.credit.remaining})`,
-            );
 
             // Send the delta, not the absolute remaining, and bump the local view up.
             void this.send({
@@ -1151,7 +1155,7 @@ export class Session<Ready extends boolean = boolean> {
     const entry = this.#pending_requests.get(ref);
     if (!entry) {
       // Stale response — the local side already timed out and cleared the pending entry.
-      this.logger?.debug(`Received response for unknown request ${clip(ref)}: ${status}`);
+      this.logger?.trace(`Received response for unknown request ${clip(ref)}: ${status}`);
       return;
     }
 
@@ -1187,14 +1191,13 @@ export class Session<Ready extends boolean = boolean> {
         const { ref, eid, callback, args } = packet.payload;
         this.#inflight_invocations.set(ref, (this.#inflight_invocations.get(ref) ?? 0) + 1);
 
-        this.logger?.debug(`Invoking callback ${clip(callback)} for packet ${clip(packet.id)}`);
         const fn = this.callbacks.get(callback);
         const context = { correlationId: ref };
 
         try {
           if (!fn) {
             // Callback not found
-            this.logger?.warn(`Callback not found for packet ${clip(packet.id)}: ${callback}`);
+            this.logger?.warn(`Callback ${callback} not found (${clip(packet.id)})`);
 
             await this.send({
               kind: WireKind.CALLBACK,
@@ -1326,7 +1329,6 @@ export class Session<Ready extends boolean = boolean> {
       iterator: iterable,
     };
     this.#outbound_streams.set(ref, stream);
-    this.logger?.debug(`Starting outbound stream ${clip(ref)}`);
 
     let seq = 0;
     try {
@@ -1362,7 +1364,6 @@ export class Session<Ready extends boolean = boolean> {
           payload: { event: "chunk", ref, seq, chunk },
         } satisfies OmitStandardFields<StreamResponsePacket>);
 
-        this.logger?.trace(`Stream ${clip(ref)} sent chunk seq=${seq} (credit=${stream.credit} remaining)`);
         seq++;
       }
 
@@ -1373,11 +1374,11 @@ export class Session<Ready extends boolean = boolean> {
         payload: { event: "end", ref, seq },
       } satisfies OmitStandardFields<StreamResponsePacket>);
 
-      this.logger?.debug(`Outbound stream ${clip(ref)} ended (${seq} chunks sent)`);
+      this.logger?.trace(`Outbound stream ${clip(ref)} ended (${seq} chunks sent)`);
     } catch (cause: unknown) {
       if (stream.cancelled) return;
       const error = QuiryError.from(cause, { correlationId: ref });
-      this.logger?.debug(
+      this.logger?.warn(
         `Outbound stream ${clip(ref)} errored at seq=${seq}: ${error.message} (${error.code})`,
       );
 
@@ -1397,8 +1398,6 @@ export class Session<Ready extends boolean = boolean> {
       });
     } finally {
       this.#outbound_streams.delete(ref);
-      this.logger?.trace(`Outbound stream ${clip(ref)} unregistered`);
-
       // Best-effort close the source iterator on any exit path — errors,
       // normal completion, or cancellation. `return()` is idempotent and
       // safe to call on a drained generator.
@@ -1482,7 +1481,7 @@ export class Session<Ready extends boolean = boolean> {
       const check = (): void => {
         if (remaining() === 0) return void resolve();
         if (Date.now() - start >= deadline) {
-          this.logger?.debug(`drain_inflight deadline hit for ${clip(ref)} with ${remaining()} pending`);
+          this.logger?.debug(`Drain inflight deadline hit for ${clip(ref)} with ${remaining()} pending`);
           this.#inflight_invocations.delete(ref);
           return void resolve();
         }
@@ -1596,10 +1595,6 @@ export class Session<Ready extends boolean = boolean> {
 
   /** --------- PUBLIC API: STATUS --------- */
 
-  isConnected(): this is Session<true> {
-    return this.#state === ("open" as SessionState);
-  }
-
   get state(): SessionState {
     return this.#state;
   }
@@ -1608,7 +1603,15 @@ export class Session<Ready extends boolean = boolean> {
     return this.#peer;
   }
 
-  get status() {
+  isConnected(): this is Session<true> {
+    return this.#state === ("open" as SessionState);
+  }
+
+  get connectedAt(): number {
+    return this.#connectedAt;
+  }
+
+  get status(): SessionStatus {
     let stubs = 0;
     for (const set of this.#remote_stubs.values()) stubs += set.size;
 
@@ -1617,10 +1620,9 @@ export class Session<Ready extends boolean = boolean> {
       pending: this.#pending_requests.size,
       streams: this.#outbound_streams.size,
       callbacks: this.callbacks.size,
-      /** Outstanding remote callback invocations awaiting RETURN. */
       invocations: this.#pending_invocations.size,
-      /** Stub ids tracked across all in-flight inbound requests. */
       stubs,
+      backpressure: this.transport.backpressure,
     };
   }
 
@@ -1661,62 +1663,14 @@ export class Session<Ready extends boolean = boolean> {
   };
 }
 
-/** Tracks in-flight operations and allows awaiting a "drain to zero" condition. */
-class InFlightTracker {
-  #inflight: number = 0;
-  readonly #resolvers: Array<() => void> = [];
-
-  enter(): void {
-    this.#inflight++;
-  }
-
-  exit(): void {
-    if (this.#inflight <= 0) throw new Error("Tracker underflow (exit without matching enter)");
-
-    this.#inflight--;
-    if (this.#inflight === 0) {
-      const resolvers = this.#resolvers.splice(0);
-      for (const resolve of resolvers) resolve();
-    }
-  }
-
-  /**
-   * Number of currently active operations.
-   */
-  get active(): number {
-    return this.#inflight;
-  }
-
-  /**
-   * Returns a promise that resolves once the active count reaches zero.
-   * If already idle, resolves immediately.
-   */
-  idle(): Promise<void> {
-    if (this.#inflight === 0) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      this.#resolvers.push(resolve);
-    });
-  }
-
-  /**
-   * Runs an async function within the barrier, ensuring proper pairing.
-   */
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    this.enter();
-    try {
-      return await fn();
-    } finally {
-      this.exit();
-    }
-  }
-
-  /**
-   * Forces the tracker into an idle state by clearing all in-flight accounting,
-   * and resolving all pending idle() waiters.
-   */
-  drain(): void {
-    this.#inflight = 0;
-    const resolvers = this.#resolvers.splice(0);
-    for (const resolve of resolvers) resolve();
-  }
+export interface SessionStatus {
+  readonly state: SessionState;
+  readonly pending: number;
+  readonly streams: number;
+  readonly callbacks: number;
+  /** Outstanding remote callback invocations awaiting RETURN. */
+  readonly invocations: number;
+  /** Stub ids tracked across all in-flight inbound requests. */
+  readonly stubs: number;
+  readonly backpressure: BackpressureSignal;
 }

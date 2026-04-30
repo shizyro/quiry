@@ -97,7 +97,7 @@ describe("Session callbacks", () => {
 
       // Force-close to abort the hanging request — the LOCAL callback
       // is still in the registry because no RELEASE has been sent.
-      await pair.consumer.close(true);
+      await pair.consumer.close("explicit", false);
       await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED });
 
       // teardown wipes the whole registry.
@@ -105,7 +105,7 @@ describe("Session callbacks", () => {
 
       // Skip the graceful close on the orphaned producer — its peer
       // is gone, the DRAIN ACK will never arrive.
-      void pair.close(true);
+      void pair.close(false);
     });
 
     it("does not leave the producer-side stub map populated after the request settles", async () => {
@@ -189,7 +189,7 @@ describe("Session callbacks", () => {
 
       expect(fn).toHaveBeenCalledTimes(2);
       // Stack-scoped — still in the registry after both requests.
-      expect(pair.consumer.hasCallback(cb.id)).toBe(true);
+      expect(pair.consumer.callable(cb.id)).toBe(true);
     });
 
     it("stack-scoped stubs survive RELEASE round-trips for unrelated local callbacks", async () => {
@@ -208,7 +208,7 @@ describe("Session callbacks", () => {
 
       // Wait for the RELEASE for the STACK callback; the LOCAL one must remain.
       await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(1));
-      expect(pair.consumer.hasCallback(cb.id)).toBe(true);
+      expect(pair.consumer.callable(cb.id)).toBe(true);
     });
 
     it("invoking a stack-scoped callback after local release returns undefined to the proxy caller", async () => {

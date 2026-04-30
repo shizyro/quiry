@@ -165,13 +165,13 @@ describe("Session requests", () => {
       await new Promise((r) => setTimeout(r, 25));
       expect(pair.consumer.status.pending).toBe(1);
 
-      await pair.consumer.close(true); // force teardown
+      await pair.consumer.close("explicit", false); // force teardown
 
       await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED, message: "Session draining" });
       expect(pair.consumer.status.pending).toBe(0);
 
       // Peer is gone, the DRAIN ACK will never arrive.
-      void pair.close(true);
+      void pair.close(false);
     });
   });
 
