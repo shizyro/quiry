@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
-import { QuiryBroker, type InferServiceRegistry } from "@/core/broker";
-import type { MappedServiceRegistry } from "@/interface/transformers";
+import { Broker } from "@/core/broker";
+import type { InferServiceRegistry } from "@/index";
 
 class GreeterService {
   greet(name: string): void {
@@ -47,7 +47,7 @@ class EventService {
   }
 }
 
-const broker = new QuiryBroker()
+const broker = new Broker()
   .expose("math", new MathService()) //
   .expose("greeter", new GreeterService())
   .expose("events", new EventService())
@@ -59,4 +59,4 @@ const broker = new QuiryBroker()
   });
 
 export default broker;
-export type AppRegistry = MappedServiceRegistry<InferServiceRegistry<typeof broker>>;
+export type AppRegistry = InferServiceRegistry<typeof broker>;

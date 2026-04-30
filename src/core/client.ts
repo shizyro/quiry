@@ -1,74 +1,101 @@
 import EventEmitter from "node:events";
 
-import { Session, normalized, type OmitStandardFields } from "@/core/session";
+import {
+  Session,
+  normalized,
+  type InquiryFunc,
+  type InquiryRequest,
+  type OmitStandardFields,
+  type SessionConfig,
+} from "@/core/session";
 import type { Transport } from "@/core/transport";
 
-import { WireKind, type RequestControl } from "@/interface/base";
+import { HeartbeatStatus, WireKind, WireStatus, type RequestControl } from "@/interface/base";
 import { SystemMessageType, type SystemIdentifyAckPacket } from "@/interface/packets";
 import type { RemoteServiceDefinition, ServiceRegistry } from "@/interface/transformers";
 
-import { attachCallerStack, captureCallerStack } from "@/lib/errors";
+import { attachCallerStack, captureCallerStack, QuiryError } from "@/lib/errors";
+import { getMemoryUsage } from "@/lib/helpers";
 
 export type CallbackHandle<T extends Function> = T & {
   release(): boolean;
   [Symbol.dispose](): void;
 };
 
-export interface QuiryClientConfig {
+export interface WorkerConfig {
   readonly name?: string;
   readonly version?: string;
   readonly metadata?: Record<string, string | number | boolean>;
-  // ...
+  readonly defaultSessionConfig?: SessionConfig;
 }
 
-type ServiceImpl = object;
-export interface QuiryClientEvents {
-  // ...
+export interface WorkerEvents {
+  connected: [];
+  disconnected: [];
+  shutdown: [reason?: string];
 }
 
-export class QuiryClient<
-  TServices extends ServiceRegistry = { [key: string]: ServiceImpl },
-> extends EventEmitter<QuiryClientEvents> {
+export class Worker<TServices extends ServiceRegistry> extends EventEmitter<WorkerEvents> {
   readonly session: Session;
-  private readonly config: Required<QuiryClientConfig>;
+  private readonly config: DeepRequired<Omit<WorkerConfig, "defaultSessionConfig">> &
+    Pick<WorkerConfig, "defaultSessionConfig">;
+
+  #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  #isShuttingDown: boolean = false;
 
   constructor(
     transport: Transport,
-    config: QuiryClientConfig = {},
+    config: WorkerConfig = {},
     private readonly logger: Logger | null = null,
   ) {
     super();
 
-    this.session = new Session(transport, {}, this.logger);
+    this.session = new Session(transport, this.inquiry.bind(this), config.defaultSessionConfig, this.logger);
     this.config = {
       name: config.name ?? "worker",
       version: config.version ?? "0.0.1",
       metadata: config.metadata ?? {},
-      // ...
+      defaultSessionConfig: config.defaultSessionConfig ?? {},
     };
   }
 
   async open(): Promise<this> {
     await this.session.open();
-    this.logger?.info(`Client opened for ${this.session}`);
+    this.logger?.info(`Worker opened for ${this.session}`);
+
+    this.session.on(
+      "close",
+      () => {
+        if (this.#heartbeatTimer) {
+          clearInterval(this.#heartbeatTimer);
+          this.#heartbeatTimer = null;
+        }
+
+        this.emit("disconnected");
+      },
+      { once: true },
+    );
 
     await this.session
       .wait(WireKind.SYSTEM, (packet) => packet.type === SystemMessageType.IDENTIFY)
       .then((feedback) => {
         this.logger?.trace(`Received identify packet from master node ${feedback.from}`);
 
-        return this.session.send({
-          kind: WireKind.SYSTEM,
-          type: SystemMessageType.IDENTIFY_ACK,
-          payload: {
-            ref: feedback.id,
-            label: this.config.name,
-            version: this.config.version,
-            metadata: this.config.metadata,
-          },
-        } satisfies OmitStandardFields<SystemIdentifyAckPacket>);
+        return this.session
+          .send({
+            kind: WireKind.SYSTEM,
+            type: SystemMessageType.IDENTIFY_ACK,
+            payload: {
+              ref: feedback.id,
+              label: this.config.name,
+              version: this.config.version,
+              metadata: this.config.metadata,
+            },
+          } satisfies OmitStandardFields<SystemIdentifyAckPacket>)
+          .finally(() => this.startPeriodicHeartbeat(feedback.payload.heartbeatInterval));
       });
 
+    this.emit("connected");
     return this;
   }
 
@@ -129,6 +156,22 @@ export class QuiryClient<
       [Symbol.dispose]: release,
       [normalized]: stub,
     }) as CallbackHandle<T>;
+  }
+
+  async shutdown(graceful: boolean = true): Promise<void> {
+    if (this.#isShuttingDown) return;
+    this.#isShuttingDown = true;
+    const start = Date.now();
+
+    if (this.#heartbeatTimer) {
+      clearInterval(this.#heartbeatTimer);
+      this.#heartbeatTimer = null;
+    }
+
+    await this.session.close(!graceful);
+
+    this.emit("shutdown");
+    this.logger?.info(`Worker shutdown complete in ${Date.now() - start}ms`);
   }
 
   private route<T = unknown>(
@@ -212,6 +255,39 @@ export class QuiryClient<
       throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
         mode === QueryMode.STREAM && iter?.throw ? iter.throw(err) : Promise.reject(err),
     } as CallOrStream<T>;
+  }
+
+  private inquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
+    // I suppose I could implement some kind of forwarded request that goes to here.
+    throw new QuiryError(WireStatus.UNIMPLEMENTED, "Worker inquiry not implemented");
+  }
+
+  private startPeriodicHeartbeat(interval: number = 30_000): void {
+    if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer);
+    this.#heartbeatTimer = setInterval(async () => {
+      if (!this.session.isConnected()) return;
+
+      try {
+        await this.session.send({
+          kind: WireKind.SYSTEM,
+          type: SystemMessageType.HEARTBEAT,
+          payload: {
+            status: HeartbeatStatus.HEALTHY,
+            metrics: {
+              memory: getMemoryUsage(),
+              cpu: { usage: process.cpuUsage() },
+              uptime: process.uptime(),
+            },
+          },
+        });
+      } catch (error: unknown) {
+        this.logger?.error(
+          `Failed to send heartbeat: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }, interval);
+
+    this.logger?.debug(`Heartbeat started with interval ${interval}ms`);
   }
 }
 

@@ -75,8 +75,9 @@ type ReadableProps<T> = T extends RemoteReadable<infer P> ? P : {};
 
 export type RemoteServiceDefinition<T> = { [K in RemotableKeys<T>]: RemoteMethod<T[K]> } & ReadableProps<T>;
 
+export type ServiceImpl = object;
 /** A registry of named services. */
-export type ServiceRegistry = Record<PropertyKey, object>;
+export type ServiceRegistry = Record<PropertyKey, ServiceImpl> & { [key: string]: ServiceImpl };
 /** Wraps service registry in a readonly interface with remote service proxies. */
 export type MappedServiceRegistry<S extends ServiceRegistry> = {
   readonly [K in keyof S]: RemoteServiceDefinition<S[K]>;
@@ -86,8 +87,8 @@ export type MappedServiceRegistry<S extends ServiceRegistry> = {
  * Look up a specific service type from a registry by name.
  * Avoids direct S[K] indexing at call sites.
  */
-export type ServiceType<S extends ServiceRegistry, K extends keyof S> = S[K];
 export type ServiceName<S extends ServiceRegistry> = keyof S & string;
+export type ServiceType<S extends ServiceRegistry, K extends keyof S> = S[K];
 
 // Utility types
 

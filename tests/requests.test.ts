@@ -127,7 +127,7 @@ describe("Session requests", () => {
   describe("session lifecycle", () => {
     it("rejects with UNAVAILABLE when the session is still in 'peering'", async () => {
       const [tA] = pairTransports();
-      const session = new Session(tA, {});
+      const session = new Session(tA);
       // never opened — state is "peering"
 
       const err = await session.request("_", "_", []).catch((e: unknown) => e);

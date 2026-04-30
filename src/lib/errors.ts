@@ -181,7 +181,7 @@ export function toWireError(
       status: (err.code === WireStatus.OK ? WireStatus.INTERNAL : err.code) as NonOkWireStatus,
       message: err.message,
       origin: err.origin,
-      reference: err.correlationId,
+      correlationId: err.correlationId,
       traceId: err.traceId,
       detail: err.detail ? sanitize(err.detail) : undefined,
       stack: err.stack,
@@ -230,7 +230,7 @@ export function fromWireError(error: WireError): QuiryError {
 
   return new QuiryError(error.status, error.message, {
     origin: error.origin,
-    correlationId: error.reference,
+    correlationId: error.correlationId,
     traceId: error.traceId,
     detail: error.detail,
     cause,

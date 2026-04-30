@@ -8,6 +8,8 @@ import type {
   WireError,
   InvocationId,
   CallbackId,
+  MetricsData,
+  HeartbeatStatus,
 } from "./base";
 
 /** Typed wire packet with message type discrimination. */
@@ -158,6 +160,7 @@ export const SystemMessageType = {
   HANDSHAKE: "handshake",
   IDENTIFY: "identify",
   IDENTIFY_ACK: "identify_ack",
+  HEARTBEAT: "heartbeat", // Heartbeat does not need an ack... right?
   DRAIN: "drain",
   DRAIN_ACK: "drain_ack",
 } as const;
@@ -170,8 +173,8 @@ export type HandshakePayload = {
 };
 
 export type IdentifyPayload = {
-  // Still not sure what to put here...
-  // I mean, it shouldn't matter anyway, right?
+  /** The interval at which the peer is expected to send heartbeats. */
+  readonly heartbeatInterval?: number;
 };
 
 export type IdentifyAckPayload = WithRef<{
@@ -180,6 +183,11 @@ export type IdentifyAckPayload = WithRef<{
   readonly metadata?: Record<string, string | number | boolean>;
   // These are probably needed at some point in the future...
 }>;
+
+export type HeartbeatPayload = {
+  readonly status: HeartbeatStatus;
+  readonly metrics?: MetricsData;
+};
 
 export type DrainPayload = {
   readonly reason?: string;
@@ -207,6 +215,9 @@ export interface SystemIdentifyAckPacket
     IdentifyAckPayload
   > {}
 
+export interface SystemHeartbeatPacket
+  extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.HEARTBEAT, HeartbeatPayload> {}
+
 export interface SystemDrainPacket
   extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.DRAIN, DrainPayload> {}
 
@@ -219,6 +230,7 @@ export type AnySystemPacket =
   | SystemHandshakePacket
   | SystemIdentifyPacket
   | SystemIdentifyAckPacket
+  | SystemHeartbeatPacket
   | SystemDrainPacket
   | SystemDrainAckPacket;
 export type AnyRequestPacket = CallRequestPacket | AbortRequestPacket | CancelRequestPacket;

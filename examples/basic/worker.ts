@@ -1,9 +1,9 @@
-import { QuiryClient } from "@/core/client";
+import { Worker } from "@/core/client";
 import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
 import type { AppRegistry } from "./provider";
 
 async function main() {
-  const client = await new QuiryClient<AppRegistry>(new WorkerThreadsTransport()).open();
+  const client = await new Worker<AppRegistry>(new WorkerThreadsTransport()).open();
 
   await (async () => {
     void client.service("greeter").greet("World");

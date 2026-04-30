@@ -57,7 +57,6 @@ export interface SessionConfig {
   readonly handshakeTimeout?: number;
   readonly defaultTimeout?: number;
   readonly drainTimeout?: number;
-  readonly inquiry?: InquiryFunc;
 }
 
 export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
@@ -147,7 +146,7 @@ export interface SessionEvents {
   close: [reason?: string];
 }
 
-export class Session {
+export class Session<Ready extends boolean = boolean> {
   private readonly emitter = new EventEmitter();
 
   #peer: NodeId | null = null;
@@ -169,10 +168,11 @@ export class Session {
 
   readonly #controllers = new Map<CorrelationId, AbortController>();
   /** The number of chunks to prefetch for each streaming request. */
-  readonly window: number = 100;
+  readonly #credit_window: number = 100;
 
   constructor(
     private readonly transport: Transport,
+    private readonly inquiry: InquiryFunc = () => Promise.resolve(),
     config: SessionConfig = {},
     private readonly logger: Logger | null = null,
   ) {
@@ -181,7 +181,6 @@ export class Session {
       handshakeTimeout: config.handshakeTimeout ?? 10_000,
       defaultTimeout: config.defaultTimeout ?? 10_000,
       drainTimeout: config.drainTimeout ?? 5000,
-      inquiry: config.inquiry ?? (() => Promise.resolve(undefined)),
     };
   }
 
@@ -256,7 +255,6 @@ export class Session {
     return this;
   }
 
-  /** Gracefully close the session. */
   async close(force: boolean = false): Promise<void> {
     if (this.#state === "closed") return;
     if (force || this.#state === "peering") return await this.terminate();
@@ -436,8 +434,8 @@ export class Session {
   }
 
   private async terminate(): Promise<void> {
-    await this.transport.close().catch(() => null);
     this.teardown();
+    await this.transport.close().catch(() => null);
   }
 
   private teardown(): void {
@@ -619,10 +617,12 @@ export class Session {
     // chunks arriving before the CALL `.then` callback still decrement the
     // right counter (producer cannot start until it sees the credit grant,
     // but other incoming packets are routed concurrently).
-    const credit = { remaining: this.window };
+    const credit = { remaining: this.#credit_window };
     const context = { correlationId: correlation, traceId: control?.traceId };
 
-    this.logger?.debug(`Opening stream ${clip(correlation)} to ${service}.${method} (window=${this.window})`);
+    this.logger?.debug(
+      `Opening stream ${clip(correlation)} to ${service}.${method} (window=${this.#credit_window})`,
+    );
 
     const entry: PendingStreamRequest = { kind: "stream", queue, credit, seq: 0 };
     if (control?.timeout) {
@@ -663,10 +663,12 @@ export class Session {
         await this.send({
           kind: WireKind.RESPONSE,
           type: ResponseMessageType.STREAM,
-          payload: { event: "credit", ref: correlation, credit: this.window },
+          payload: { event: "credit", ref: correlation, credit: this.#credit_window },
         } satisfies OmitStandardFields<StreamResponsePacket>);
 
-        this.logger?.trace(`Stream ${clip(correlation)} initial credit grant sent (credit=${this.window})`);
+        this.logger?.trace(
+          `Stream ${clip(correlation)} initial credit grant sent (credit=${this.#credit_window})`,
+        );
       } catch (cause: unknown) {
         this.logger?.warn(
           `Failed to initiate stream ${clip(correlation)}: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -741,12 +743,13 @@ export class Session {
   async wait<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
     kind: K,
     predicate?: (packet: PacketByKind<K>) => packet is R,
-    timeout?: number,
+    { timeout, signal }: { timeout?: number; signal?: AbortSignal } = {},
   ): Promise<R> {
-    // @ts-expect-error - no plans to type this properly
+    // @ts-expect-error: no plans to type this properly
     return this.router
       .wait((packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true), {
-        timeout, // TODO: abort signal
+        timeout,
+        signal,
       })
       .catch((error: unknown) => {
         if (error instanceof Error && error.message.includes("Timeout")) {
@@ -756,6 +759,28 @@ export class Session {
         }
         throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause: error });
       });
+  }
+
+  listen<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: PacketByKind<K>) => packet is R,
+    handler: (packet: R) => void,
+  ): () => void {
+    return this.router.listen(
+      (packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true),
+      handler,
+    );
+  }
+
+  intercept<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: PacketByKind<K>) => packet is R,
+    handler: (packet: R) => boolean,
+  ): () => void {
+    return this.router.intercept(
+      (packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true),
+      handler,
+    );
   }
 
   bind<T extends Function>(fn: T): Callback {
@@ -935,7 +960,7 @@ export class Session {
       }
 
       try {
-        const result = this.config.inquiry(request);
+        const result = this.inquiry(request);
         const isIterable = typeof result === "object" && result !== null && Symbol.asyncIterator in result;
 
         const value = !isIterable
@@ -1056,8 +1081,8 @@ export class Session {
           entry.queue.enqueue(packet.payload.chunk);
 
           // Replenish credit when half the window is consumed.
-          if (entry.credit.remaining <= Math.floor(this.window / 2)) {
-            const grant = this.window - entry.credit.remaining;
+          if (entry.credit.remaining <= Math.floor(this.#credit_window / 2)) {
+            const grant = this.#credit_window - entry.credit.remaining;
             entry.credit.remaining += grant;
 
             this.logger?.trace(
@@ -1570,6 +1595,10 @@ export class Session {
   }
 
   /** --------- PUBLIC API: STATUS --------- */
+
+  isConnected(): this is Session<true> {
+    return this.#state === ("open" as SessionState);
+  }
 
   get state(): SessionState {
     return this.#state;

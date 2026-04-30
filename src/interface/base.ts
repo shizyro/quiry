@@ -83,7 +83,7 @@ export interface WireError {
   readonly status: Exclude<WireStatus, typeof WireStatus.OK>;
   readonly message: string;
   readonly origin: NodeId;
-  readonly reference?: CorrelationId;
+  readonly correlationId?: CorrelationId;
   readonly traceId?: TraceId;
   readonly detail?: Record<string, unknown>;
   /** Remote origin's stack, if available. Reattached to the local rebuilt error. */
@@ -105,4 +105,27 @@ export interface RetryPolicy {
   readonly maxAttempts?: number;
   readonly backoff?: "fixed" | "exponential";
   readonly delay?: number;
+}
+
+export const HeartbeatStatus = {
+  HEALTHY: "healthy",
+  DEGRADED: "degraded",
+  CRITICAL: "critical",
+  DISCONNECTED: "disconnected",
+} as const;
+export type HeartbeatStatus = (typeof HeartbeatStatus)[keyof typeof HeartbeatStatus];
+
+export interface MetricsData {
+  readonly memory?: {
+    readonly heapUsed: number;
+    readonly heapTotal: number;
+    readonly external: number;
+    readonly rss: number;
+  };
+  readonly cpu?: {
+    readonly usage: NodeJS.CpuUsage;
+    readonly loadAverage?: readonly number[];
+  };
+  readonly uptime?: number;
+  readonly custom?: Record<string, number>;
 }

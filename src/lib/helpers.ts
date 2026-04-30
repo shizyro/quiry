@@ -1,6 +1,7 @@
 import type { AnyPacket } from "@/interface/packets";
+import type { Serializable } from "node:child_process";
 
-export function isSerializable(value: unknown, seen = new WeakSet<object>()): boolean {
+export function isSerializable(value: unknown, seen = new WeakSet<object>()): value is Serializable {
   if (value === null || value === undefined) return true;
   const t = typeof value;
   if (t === "string" || t === "number" || t === "boolean" || t === "bigint") return true;

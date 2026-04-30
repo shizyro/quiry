@@ -19,13 +19,11 @@ export async function openSessionPair(options: {
 }): Promise<SessionPair> {
   const [tA, tB] = pairTransports();
 
-  const producer = new Session(tA, {
+  const producer = new Session(tA, options.producerInquiry, {
     ...options.config,
-    inquiry: options.producerInquiry,
   });
-  const consumer = new Session(tB, {
+  const consumer = new Session(tB, options.consumerInquiry, {
     ...options.config,
-    inquiry: options.consumerInquiry,
   });
 
   // Both sessions must call `open()` concurrently — each one sends a
