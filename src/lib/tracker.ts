@@ -48,8 +48,8 @@ export class InFlightTracker {
   }
 
   /**
-   * Forces the tracker into an idle state by clearing all in-flight accounting,
-   * and resolving all pending idle() waiters.
+   * Resets the in-flight count to zero without pairing `exit` calls — use for teardown only;
+   * resolves all pending {@link InFlightTracker.idle} waiters.
    */
   drain(): void {
     this.#inflight = 0;

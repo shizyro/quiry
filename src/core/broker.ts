@@ -23,7 +23,7 @@ import { ChildProcessTransport } from "./transport/child-process";
 import { HeartbeatStatus, WireKind, WireStatus, type MetricsData, type NodeId } from "@/interface/base";
 import type { ServiceRegistry } from "@/interface/transformers";
 
-import { QuiryError } from "@/lib/errors";
+import { QuiryError } from "@/shared/errors";
 import { clip } from "@/lib/helpers";
 
 export interface PeerHandle {
@@ -67,6 +67,9 @@ export interface BrokerEvents {
   error: [error: Error];
 }
 
+/**
+ * Host-side registry: exposes services, attaches worker transports, runs identify + heartbeat.
+ */
 export class Broker<TServices extends ServiceRegistry> extends EventEmitter<BrokerEvents> {
   private readonly config: DeepRequired<Omit<BrokerConfig, "session">> & Pick<BrokerConfig, "session">;
 
@@ -103,18 +106,24 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     };
   }
 
-  /** --------- PUBLIC API: PEER MANAGEMENT --------- */
+  // --------- PUBLIC API: PEER MANAGEMENT --------- //
 
+  /** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
   fork(filename: string | URL, options: ForkOptions = {}): Promise<PeerHandle> {
     const subprocess = fork(filename, options);
     return this.attach(new ChildProcessTransport({ child: subprocess }));
   }
 
+  /** Spawns a worker thread at `filename` and attaches it as a new peer via {@link WorkerThreadsTransport}. */
   spawn(filename: string | URL, options: NJSWorkerOptions = {}): Promise<PeerHandle> {
     const worker = new NJSWorker(filename, options);
     return this.attach(new WorkerThreadsTransport({ worker }));
   }
 
+  /**
+   * Opens a session, runs identify, registers the peer. On duplicate node id, closes the session
+   * and throws {@link QuiryError} `FAILED_PRECONDITION`. On identify failure, closes before rethrowing.
+   */
   async attach(transport: Transport): Promise<PeerHandle> {
     const session = await new Session(
       transport,
@@ -230,6 +239,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
       });
   }
 
+  /** @param kill When false (default), session closes cooperatively; when true, underlying worker may be force-stopped via transport. */
   async detach(id: string | number | NodeId, kill: boolean = false): Promise<void> {
     const peerId = String(id) as NodeId;
     const handle = this.workers.get(peerId);
@@ -255,8 +265,12 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     return this.workers.values();
   }
 
-  /** --------- PUBLIC API: SERVICES --------- */
+  // --------- PUBLIC API: SERVICES --------- //
 
+  /**
+   * Registers a service impl for remote dispatch. Duplicate names throw {@link QuiryError} `FAILED_PRECONDITION`.
+   * @returns Same broker instance with narrowed registry type for chaining.
+   */
   expose<TName extends string, TImpl extends object>(
     name: TName,
     impl: TImpl,
@@ -276,6 +290,10 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     return this;
   }
 
+  /**
+   * Closes all peer sessions (graceful by default), stops the heartbeat monitor,
+   * and clears the service registry. Idempotent — subsequent calls return immediately.
+   */
   async shutdown(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#isShuttingDown) return;
     this.#isShuttingDown = true;
@@ -300,7 +318,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     this.logger?.info(`Broker shutdown complete in ${Date.now() - start}ms`);
   }
 
-  /** --------- INTERNALS: INQUIRY --------- */
+  // --------- INTERNALS: INQUIRY --------- //
 
   private inquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
     this.logger?.trace(`Received inquiry request with id ${clip(request.id)}`);
@@ -333,7 +351,7 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
     return fn.apply(impl, request.args as unknown[]);
   }
 
-  /** --------- INTERNALS: HEARTBEAT MONITOR --------- */
+  // --------- INTERNALS: HEARTBEAT MONITOR --------- //
 
   private startHeartbeatMonitor(): void {
     this.#heartbeatTimer = setInterval(() => {

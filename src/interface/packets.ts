@@ -23,7 +23,7 @@ type WithRef<T = {}, Nullable extends boolean = false> = T & {
   readonly ref: Nullable extends true ? CorrelationId | null : CorrelationId;
 };
 
-/** --------- REQUEST PACKETS --------- */
+// --------- REQUEST PACKETS --------- //
 
 export const RequestMessageType = { CALL: "call", ABORT: "abort", CANCEL: "cancel" } as const;
 export type RequestMessageType = (typeof RequestMessageType)[keyof typeof RequestMessageType];
@@ -55,7 +55,7 @@ export type CancelPayload = WithRef;
 export interface CancelRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.CANCEL, CancelPayload> {}
 
-/** --------- RESPONSE PACKETS --------- */
+// --------- RESPONSE PACKETS --------- //
 
 export const ResponseMessageType = { VALUE: "value", STREAM: "stream" } as const;
 export type ResponseMessageType = (typeof ResponseMessageType)[keyof typeof ResponseMessageType];
@@ -113,7 +113,7 @@ export interface StreamResponsePacket
     StreamResponsePayload
   > {}
 
-/** --------- CALLBACK PACKETS --------- */
+// --------- CALLBACK PACKETS --------- //
 
 export const CallbackMessageType = { INVOKE: "invoke", RETURN: "return", RELEASE: "release" } as const;
 export type CallbackMessageType = (typeof CallbackMessageType)[keyof typeof CallbackMessageType];
@@ -154,7 +154,7 @@ export interface CallbackReleasePacket
     CallbackReleasePayload
   > {}
 
-/** --------- SYSTEM PACKETS --------- */
+// --------- SYSTEM PACKETS --------- //
 
 export const SystemMessageType = {
   HANDSHAKE: "handshake",
@@ -223,7 +223,7 @@ export interface SystemDrainPacket
 export interface SystemDrainAckPacket
   extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.DRAIN_ACK, DrainAckPayload> {}
 
-/** --------- UNION TYPES --------- */
+// --------- UNION TYPES --------- //
 
 export type AnySystemPacket =
   | SystemHandshakePacket

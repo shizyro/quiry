@@ -39,7 +39,7 @@ import {
 
 import { Router } from "@/lib/router";
 import { AsyncQueue } from "@/lib/queue";
-import { fromWireError, isRetryableStatus, QuiryError, toWireError } from "@/lib/errors";
+import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/shared/errors";
 
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
@@ -62,6 +62,7 @@ export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
  */
 export const normalized: unique symbol = Symbol("quiry.normalized");
 
+/** Unwraps `[normalized]` aliases; preserves cycles for a later `isSerializable` rejection instead of blowing the stack. */
 function normalize<T = unknown>(value: T, seen?: WeakSet<object>): T {
   if (Object(value) !== value || value === null) return value;
   if (normalized in (value as object)) return (value as unknown as { [normalized]: T })[normalized];
@@ -148,6 +149,10 @@ export interface SessionEvents {
   error: [error: Error];
 }
 
+/**
+ * Bidirectional RPC session over a {@link Transport}: handshake, requests, streams, callbacks, and drain.
+ * Incoming routing runs on a {@link Router}; unhandled async errors in packet handlers shut the session down.
+ */
 export class Session<Ready extends boolean = boolean> {
   private readonly emitter = new EventEmitter();
 
@@ -187,6 +192,7 @@ export class Session<Ready extends boolean = boolean> {
     };
   }
 
+  /** Fills `id`, `from`, `timestamp`, then {@link Session.forward}. */
   send(packet: Omit<AnyTypedPacket, "id" | "from" | "timestamp">): Promise<CorrelationId> {
     return this.forward({
       id: nanoid() as CorrelationId,
@@ -196,6 +202,9 @@ export class Session<Ready extends boolean = boolean> {
     } as AnyPacket);
   }
 
+  /**
+   * Sends on the transport when not `closed`; otherwise no-ops (returns id) so drain/teardown can still complete.
+   */
   protected async forward(packet: AnyPacket): Promise<CorrelationId> {
     // Silently drop sends on a closed session. This can happen during teardown
     // when cleanup code attempts to send RELEASE after the transport is gone.
@@ -224,8 +233,12 @@ export class Session<Ready extends boolean = boolean> {
     return () => this.emitter.off(event, listener);
   }
 
-  /** --------- PUBLIC API: LIFECYCLE --------- */
+  // --------- PUBLIC API: LIFECYCLE --------- //
 
+  /**
+   * Opens transport, performs system handshake, starts the receive {@link Router}.
+   * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
+   */
   async open(): Promise<this> {
     if (this.#state !== "peering")
       throw new QuiryError(
@@ -259,13 +272,18 @@ export class Session<Ready extends boolean = boolean> {
     return this;
   }
 
+  /**
+   * Initiates a cooperative close. Graceful close runs the drain protocol (announces, quiesces,
+   * waits for peer ACK); non-graceful (or `peering` state) skips straight to `terminate`.
+   * Multiple concurrent calls collapse onto a single drain promise.
+   */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#state === "closed") return;
     if (!graceful || this.#state === "peering") return await this.terminate();
     return (this.#drain_promise ??= this.performDrain("local", reason));
   }
 
-  /** --------- INTERNALS: LIFECYCLE --------- */
+  // --------- INTERNALS: LIFECYCLE --------- //
 
   private async performHandshake(): Promise<void> {
     const id = await this.forward({
@@ -467,8 +485,12 @@ export class Session<Ready extends boolean = boolean> {
     void this.transport.close().catch(() => null);
   }
 
-  /** --------- PUBLIC API: REQUESTS & CALLBACKS --------- */
+  // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
 
+  /**
+   * Unary RPC with optional retries ({@link isRetryableStatus}), timeout, and `AbortSignal` -> `ABORT` on wire.
+   * @throws `UNAVAILABLE` when not `open`; `INVALID_ARGUMENT` when args are not serializable; remote errors as {@link QuiryError} from wire.
+   */
   async request(
     service: string,
     method: string,
@@ -597,6 +619,10 @@ export class Session<Ready extends boolean = boolean> {
     );
   }
 
+  /**
+   * Server-streaming consumer: credit-based flow control; iterator `return`/`throw` sends `CANCEL`.
+   * When not `open`, returns an iterator whose `next` rejects with `UNAVAILABLE` (sync throw only for bad args).
+   */
   stream(
     service: string,
     method: string,
@@ -744,6 +770,10 @@ export class Session<Ready extends boolean = boolean> {
     };
   }
 
+  /**
+   * Awaits the next inbound packet matching `kind` (and optional `predicate`) via the session {@link Router}.
+   * @throws {@link QuiryError} `DEADLINE_EXCEEDED` on timeout, `ABORTED` on signal — not the raw `Error` strings from {@link Router.wait}.
+   */
   async wait<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
     kind: K,
     predicate?: (packet: PacketByKind<K>) => packet is R,
@@ -765,6 +795,7 @@ export class Session<Ready extends boolean = boolean> {
       });
   }
 
+  /** Passive, persistent listener for a specific packet kind. Matching packets are still forwarded to other consumers. Returns unsubscribe. */
   listen<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
     kind: K,
     predicate: (packet: PacketByKind<K>) => packet is R,
@@ -776,6 +807,10 @@ export class Session<Ready extends boolean = boolean> {
     );
   }
 
+  /**
+   * Active interceptor for a specific packet kind. When `handler` returns `true` the packet
+   * is consumed and not forwarded to the default handler. Returns unsubscribe.
+   */
   intercept<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
     kind: K,
     predicate: (packet: PacketByKind<K>) => packet is R,
@@ -787,6 +822,7 @@ export class Session<Ready extends boolean = boolean> {
     );
   }
 
+  /** Registers a session-scoped callback stub; pair with {@link Session.release} or `CallbackHandle` dispose. */
   bind<T extends Function>(fn: T): Callback {
     const callback = this.callbacks.register(fn, CallbackScope.STACK);
     this.logger?.debug(`Created callback proxy ${clip(callback)} (${sizeof(fn)} bytes)`);
@@ -808,7 +844,7 @@ export class Session<Ready extends boolean = boolean> {
     return this.callbacks.get(id) !== undefined;
   }
 
-  /** --------- INTERNALS: ROUTING --------- */
+  // --------- INTERNALS: ROUTING --------- //
 
   private routeIncomingPacket(packet: AnyPacket): void {
     // Each handle* is fire-and-forget (concurrent). Any unhandled throw
@@ -1294,7 +1330,7 @@ export class Session<Ready extends boolean = boolean> {
     }
   }
 
-  /** --------- INTERNALS: REQUEST HANDLING --------- */
+  // --------- INTERNALS: REQUEST HANDLING --------- //
 
   private rejectAllPending(error: Error): void {
     for (const request of this.#pending_requests.values()) {
@@ -1318,6 +1354,10 @@ export class Session<Ready extends boolean = boolean> {
     this.#outbound_streams.clear();
   }
 
+  /**
+   * Producer side of a server-stream response. Pulls chunks from `iterable` only when the
+   * consumer has granted credit, preventing unbounded memory accumulation on a slow consumer.
+   */
   private async streamOutboundResponse(
     ref: CorrelationId,
     iterable: AsyncIterableIterator<unknown>,
@@ -1432,7 +1472,7 @@ export class Session<Ready extends boolean = boolean> {
     }
   }
 
-  /** --------- INTERNALS: CALLBACK HANDLING --------- */
+  // --------- INTERNALS: CALLBACK HANDLING --------- //
 
   private async releaseRemoteSubs(ref: CorrelationId): Promise<void> {
     // Wait for any in-flight invocations to complete before releasing.
@@ -1462,6 +1502,11 @@ export class Session<Ready extends boolean = boolean> {
     } satisfies OmitStandardFields<CallbackReleasePacket>).catch(() => null);
   }
 
+  /**
+   * Polls via `setImmediate` until all in-flight `CBK:INVOKE` packets under `ref` have received
+   * their `CBK:RETURN`. Falls through after `defaultTimeout` to avoid blocking indefinitely on
+   * an unresponsive peer; remaining callbacks are implicitly released when `callbacks.clear()` fires.
+   */
   private drainInflightInvocations(ref: CorrelationId): Promise<void> {
     const remaining = (): number => {
       let n = this.#inflight_invocations.get(ref) ?? 0;
@@ -1498,6 +1543,13 @@ export class Session<Ready extends boolean = boolean> {
     n <= 1 ? this.#inflight_invocations.delete(ref) : this.#inflight_invocations.set(ref, n - 1);
   }
 
+  /**
+   * Rebuilds the argument list on the receiver side: replaces each {@link Callback} stub
+   * with a live async function that sends `CBK:INVOKE` and awaits `CBK:RETURN`.
+   *
+   * `LOCAL`-scoped stub ids are tracked in `#remote_stubs[ref]` for bulk `CBK:RELEASE`
+   * once the owning request completes.
+   */
   private restoreStubs(args: ReadonlyArray<unknown>, ref: CorrelationId): ReadonlyArray<unknown> {
     const track = (stub: Callback): CallbackId => {
       if (stub.scope === CallbackScope.STACK) return stub.id;
@@ -1523,6 +1575,11 @@ export class Session<Ready extends boolean = boolean> {
     });
   }
 
+  /**
+   * Creates an async proxy for a remote callback. Each call sends `CBK:INVOKE` and awaits
+   * the `CBK:RETURN` packet, bounded by `defaultTimeout`. Unobserved rejections are silently
+   * caught to prevent unhandled-rejection noise in fire-and-forget callback patterns.
+   */
   private makeRemoteCallback(
     callback: CallbackId,
     ref: CorrelationId,
@@ -1593,7 +1650,7 @@ export class Session<Ready extends boolean = boolean> {
     };
   }
 
-  /** --------- PUBLIC API: STATUS --------- */
+  // --------- PUBLIC API: STATUS --------- //
 
   get state(): SessionState {
     return this.#state;
@@ -1626,7 +1683,7 @@ export class Session<Ready extends boolean = boolean> {
     };
   }
 
-  /** --------- INTERNALS: EVENT HANDLERS --------- */
+  // --------- INTERNALS: EVENT HANDLERS --------- //
 
   private readonly onTransportClose = (): void => {
     if (this.#state === "closed" || this.#state === "draining") return;

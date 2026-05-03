@@ -89,6 +89,7 @@ export class Queue<T> implements Iterable<T> {
   }
 }
 
+/** Async-iterable, pull-based queue with backpressure. */
 export class AsyncQueue<T> extends Queue<T> implements AsyncIterableIterator<T> {
   private closed = false;
   private error: unknown = null;

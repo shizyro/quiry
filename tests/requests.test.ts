@@ -1,6 +1,6 @@
 import { Session, type InquiryFunc, type InquiryRequest } from "@/core/session";
 import { WireStatus, type TraceId } from "@/interface/base";
-import { QuiryError } from "@/lib/errors";
+import { QuiryError } from "@/shared/errors";
 
 import { pairTransports } from "./helpers/mock-transport";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";

@@ -1,4 +1,4 @@
-import { QuiryError } from "./errors";
+import { QuiryError } from "@/shared/errors";
 import { WireStatus } from "@/interface/base";
 
 // Timing utilities
@@ -7,7 +7,7 @@ export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Abort a promise after a timeout. */
+/** @throws {@link QuiryError} with `DEADLINE_EXCEEDED` if `ms` elapses before `promise` settles. */
 export function timeout<T>(promise: Promise<T>, ms: number, message?: string): Promise<T> {
   return Promise.race([
     promise,
@@ -100,6 +100,7 @@ export function retryable<T>(
   });
 }
 
+/** @throws {@link QuiryError} `ABORTED` when `signal` aborts; rejects immediately if already aborted. */
 export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal?.aborted) return Promise.reject(new QuiryError(WireStatus.ABORTED, "Operation was aborted"));
 

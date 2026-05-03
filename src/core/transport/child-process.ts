@@ -7,6 +7,10 @@ export interface ChildProcessTransportOptions extends TransportOptions {
   readonly child?: ChildProcess;
 }
 
+/**
+ * Dual-mode transport for `child_process.fork`. In the parent process, requires `opts.child`;
+ * in the forked child it wraps `process` directly.
+ */
 export class ChildProcessTransport extends BaseTransport {
   private readonly port: ChildProcess | NodeJS.Process;
 

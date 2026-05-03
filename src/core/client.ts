@@ -21,7 +21,7 @@ import {
 import { SystemMessageType, type SystemIdentifyAckPacket } from "@/interface/packets";
 import type { RemoteServiceDefinition, ServiceRegistry } from "@/interface/transformers";
 
-import { attachCallerStack, captureCallerStack, QuiryError } from "@/lib/errors";
+import { QuiryError, attachCallerStack, captureCallerStack } from "@/shared/errors";
 import { getMemoryUsage } from "@/lib/helpers";
 
 export type CallbackHandle<T extends Function> = T & {
@@ -52,9 +52,14 @@ export interface WorkerEvents {
   error: [error: Error];
 }
 
+/**
+ * Worker-side peer: one {@link Session} per transport, answers identify, sends heartbeats,
+ * and exposes typed service proxies.
+ */
 export class Worker<TServices extends ServiceRegistry> extends EventEmitter<WorkerEvents> {
-  private readonly session: Session;
   private readonly config: DeepRequired<Omit<WorkerConfig, "session">> & Pick<WorkerConfig, "session">;
+  private readonly session: Session;
+
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #isShuttingDown: boolean = false;
 
@@ -64,6 +69,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     private readonly logger: Logger | null = null,
   ) {
     super();
+    if (!transport) throw new Error("Transport is required. Use the `new Worker(transport)` constructor.");
 
     this.session = new Session(transport, this.inquiry.bind(this), config.session, this.logger);
     this.config = {
@@ -100,6 +106,10 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     };
   }
 
+  /**
+   * Completes handshake, waits for host identify, sends identify-ack, starts heartbeat interval from host payload (fallback to config).
+   * @throws Same failures as {@link Session.open} / identify wait path.
+   */
   async open(): Promise<this> {
     await this.session.open();
     this.logger?.info(`Worker opened for ${this.session}`);
@@ -138,6 +148,9 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     return this;
   }
 
+  /**
+   * Sends a unary RPC request to the remote service. Supporting both spread and explicit array arguments.
+   */
   async call(service: string, method: string, ...args: unknown[]): Promise<unknown>;
   async call(service: string, method: string, args: unknown[], options?: RequestControl): Promise<unknown>;
   async call(service: string, method: string, ...rest: unknown[]): Promise<unknown> {
@@ -161,6 +174,10 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     return this.session.stream(service, method, args, options);
   }
 
+  /**
+   * Typed facade over unary `Session.request` and streaming `Session.stream`; each method returns a dual handle
+   * (await vs async-iteration) with mutual exclusion enforced at runtime — see {@link CallOrStream}.
+   */
   service<TName extends keyof TServices>(identifier: TName): RemoteServiceDefinition<TServices[TName]> {
     return new Proxy({} as RemoteServiceDefinition<TServices[TName]>, {
       get: (_, prop) => {
@@ -197,6 +214,9 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     }) as CallbackHandle<T>;
   }
 
+  /**
+   * Stops the heartbeat interval, closes the session, and emits `shutdown`. Idempotent.
+   */
   async shutdown(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#isShuttingDown) return;
     this.#isShuttingDown = true;
@@ -349,10 +369,8 @@ enum QueryMode {
 }
 
 /**
- * Accepts either `(arg1, arg2, ...)` or `([arg1, arg2, ...], options)` and
- * normalizes them into `(args, options?)`. The overload is detected by
- * sniffing the last argument for `RequestControl`-shaped keys, so callers
- * can pass positional arguments directly without wrapping them in an array.
+ * If the last element is a non-null object with `timeout`, `retries`, or `signal`, it is peeled off as
+ * {@link RequestControl}; otherwise the whole `rest` array is positional arguments.
  */
 function splitArgsAndOptions(rest: unknown[]): [unknown[], RequestControl | undefined] {
   if (

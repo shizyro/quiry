@@ -8,6 +8,11 @@ export interface WorkerThreadsTransportOptions extends TransportOptions {
   readonly worker?: Worker;
 }
 
+/**
+ * Dual-mode transport for `worker_threads`. In the main thread, requires `opts.worker`;
+ * in a worker thread it automatically binds to `parentPort`. Both sides exchange
+ * packets via `postMessage` / `message` using the same underlying channel.
+ */
 export class WorkerThreadsTransport extends BaseTransport {
   private readonly port: Worker | MessagePort;
 

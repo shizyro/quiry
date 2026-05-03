@@ -18,6 +18,7 @@ export class PacketQueue extends Queue<AnyPacket> implements AsyncIterable<AnyPa
     this.#waiting = null;
   }
 
+  /** Drains buffered items, marks closed; pending iterator waiters resolve and the loop exits. */
   close(): void {
     if (this.#closed) return;
     this.clear();

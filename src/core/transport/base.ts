@@ -68,6 +68,10 @@ export abstract class BaseTransport implements Transport {
   abstract open(): Promise<void>;
   abstract close(): Promise<void>;
 
+  /**
+   * Enqueues a decoded message from the underlying channel.
+   * Non-packets are dropped (no throw) so a malformed message cannot tear down the transport.
+   */
   protected read(value: unknown): void {
     if (!isWirePacket(value)) {
       //// throw new TransportError("Invalid wire packet", { kind: "receive", cause: value });

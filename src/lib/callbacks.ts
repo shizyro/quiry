@@ -36,11 +36,15 @@ type CallbackEntry = {
   | { readonly scope: CallbackScope.STACK }
 );
 
+/** In-process callback table keyed by id; LOCAL entries are grouped by request `ref` for bulk release. */
 export class CallbackRegistry {
   readonly #by_id = new Map<CallbackId, CallbackEntry>();
   readonly #by_ref = new Map<CorrelationId, Set<CallbackId>>();
   readonly #session_scoped = new Set<CallbackId>();
 
+  /**
+   * Registers a callback with the given scope and optional correlation ID.
+   */
   register(fn: Function, scope: CallbackScope.STACK): CallbackId;
   register(fn: Function, scope: CallbackScope.LOCAL, ref: CorrelationId): CallbackId;
   register(fn: Function, scope: CallbackScope, ref?: CorrelationId): CallbackId {
@@ -82,6 +86,11 @@ export class CallbackRegistry {
     return true;
   }
 
+  /**
+   * Removes all `LOCAL`-scoped callbacks registered under `ref` and returns their ids.
+   * Used after a request completes to bulk-release all function arguments that were
+   * substituted as stubs for that request.
+   */
   releaseScoped(ref: CorrelationId): ReadonlyArray<CallbackId> {
     const set = this.#by_ref.get(ref);
     if (!set || set.size === 0) return [];
@@ -91,6 +100,10 @@ export class CallbackRegistry {
     return Array.from(set);
   }
 
+  /**
+   * Removes all `STACK`-scoped (session-lifetime) callbacks and returns their ids.
+   * Called during session drain so the remote side can be notified via `CBK:RELEASE`.
+   */
   releaseStackScoped(): ReadonlyArray<CallbackId> {
     if (this.#session_scoped.size === 0) return [];
     const ids = Array.from(this.#session_scoped);

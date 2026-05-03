@@ -225,7 +225,7 @@ function sanitize(detail: Record<string, unknown>): Record<string, unknown> {
 export function fromWireError(error: WireError): QuiryError {
   const cause = error.cause ? fromWireError(error.cause) : undefined;
   const stack = error.stack
-    ? `${QuiryError.constructor.name}: ${error.message}\n\t[remote origin ${error.origin}]n${stripStackHeader(error.stack)}`
+    ? `${QuiryError.constructor.name}: ${error.message}\n\t[remote origin ${error.origin}]\n${stripStackHeader(error.stack)}`
     : undefined;
 
   return new QuiryError(error.status, error.message, {

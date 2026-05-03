@@ -1,6 +1,10 @@
 import type { AnyPacket } from "@/interface/packets";
 import type { Serializable } from "node:child_process";
 
+/**
+ * Whether `value` is safe for structured clone / typical IPC payloads (plain data only).
+ * Typed arrays, `ArrayBuffer`, and ports are rejected here — use transfer lists for those.
+ */
 export function isSerializable(value: unknown, seen = new WeakSet<object>()): value is Serializable {
   if (value === null || value === undefined) return true;
   const t = typeof value;
@@ -25,6 +29,7 @@ export function isPlainObject(value: unknown): value is object {
   return proto === Object.prototype || proto === null;
 }
 
+/** Shape check for session routing; intentionally loose vs full packet typing. */
 export function isWirePacket(value: unknown): value is AnyPacket {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;

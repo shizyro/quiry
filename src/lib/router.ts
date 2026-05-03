@@ -22,7 +22,10 @@ interface Interceptor<T> {
   handler: (value: T) => boolean; // consumed if true
 }
 
-/** A simple router for handling asynchronous streams of values. */
+/**
+ * A simple router for handling asynchronous streams of values.
+ * Fans an async-iterable source out to typed, priority-ordered consumers.
+ */
 export class Router<T> {
   #running: boolean = false;
 
@@ -32,6 +35,11 @@ export class Router<T> {
 
   constructor(private readonly source: AsyncIterable<T>) {}
 
+  /**
+   * Starts consuming `source`. Each value is dispatched to waiting predicates,
+   * then interceptors (may consume), then listeners, then the default `handler`.
+   * Rejects all pending `wait` promises when the source closes or errors.
+   */
   async start(handler: (value: T) => void): Promise<void> {
     if (this.#running) throw new Error("Router is already running");
     this.#running = true;
@@ -79,6 +87,12 @@ export class Router<T> {
     }
   }
 
+  /**
+   * Resolves the next time a value satisfying `predicate` passes through.
+   *
+   * Higher routing priority than interceptors and listeners — the waiter is matched and removed
+   * before the value reaches any other consumer.
+   */
   async wait<U extends T>(predicate: Predicate<U>, options?: WaitOptions): Promise<U> {
     if (!this.#running) throw new Error("Router is not running");
 
@@ -111,12 +125,18 @@ export class Router<T> {
     });
   }
 
+  /** Passive, persistent subscription. Receives every value matching `predicate` but cannot consume it. */
   listen<U extends T>(predicate: Predicate<U>, handler: (value: U) => void): Unsubscribe {
     const l = { predicate, handler } as Listener<T>;
     this.#listeners.add(l);
     return () => this.#listeners.delete(l);
   }
 
+  /**
+   * Active interceptor with consumption semantics. When `handler` returns `true` the value
+   * is not forwarded to listeners or the default handler.
+   * @returns Unsubscribe callback.
+   */
   intercept<U extends T>(predicate: Predicate<U>, handler: (value: U) => boolean): Unsubscribe {
     const i = { predicate, handler } as Interceptor<T>;
     this.#interceptors.add(i);
