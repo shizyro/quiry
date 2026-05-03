@@ -1,5 +1,4 @@
 import type { AnyPacket } from "@/interface/packets";
-import type { Serializable } from "node:child_process";
 
 /**
  * Whether `value` is safe for structured clone / typical IPC payloads (plain data only).
@@ -21,6 +20,27 @@ export function isSerializable(value: unknown, seen = new WeakSet<object>()): va
     return Object.values(value as Record<string, unknown>).every((v) => isSerializable(v, seen));
   }
   return false;
+}
+
+export function isPrimitive(value: unknown): value is Primitive {
+  return (
+    typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null
+  );
+}
+
+export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as PromiseLike<unknown>).then === "function"
+  );
+}
+
+export function isAnyIterable(value: unknown): value is Iterable<unknown> | AsyncIterable<unknown> {
+  return (
+    typeof value === "object" && value !== null && (Symbol.iterator in value || Symbol.asyncIterator in value)
+  );
 }
 
 export function isPlainObject(value: unknown): value is object {

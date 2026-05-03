@@ -111,7 +111,7 @@ describe("The worker class", () => {
   describe("calls & streams", () => {
     it("`call` forwards args verbatim to `Session.request`", async () => {
       const { worker } = await openWorker({
-        hostInquiry: async (req: InquiryRequest) => ({ s: req.service, m: req.method, a: req.args }),
+        hostInquiry: async (req: InquiryRequest) => ({ s: req.service, m: req.property, a: req.args }),
       });
 
       await expect(worker.call("svc", "do", "x", 1)).resolves.toEqual({
@@ -159,10 +159,10 @@ describe("The worker class", () => {
     });
   });
 
-  describe("service proxy", () => {
+  describe("service apply proxy", () => {
     it("awaits → unary call (CALL path)", async () => {
       const { worker } = await openWorker({
-        hostInquiry: async (req: InquiryRequest) => ({ s: req.service, m: req.method }),
+        hostInquiry: async (req: InquiryRequest) => ({ s: req.service, m: req.property }),
       });
 
       type Reg = { svc: { ping(): Promise<{ s: string; m: string }> } };
@@ -234,7 +234,7 @@ describe("The worker class", () => {
 
       // Microtask flushes the auto-trigger; give the wire a beat.
       await vi.waitFor(() => expect(calls).toHaveLength(1));
-      expect(calls[0]!.method).toBe("fire");
+      expect(calls[0]!.property).toBe("fire");
       expect(calls[0]!.args).toEqual(["yo"]);
     });
   });
@@ -255,7 +255,7 @@ describe("The worker class", () => {
 
       await proxy.go();
       expect(seen).toHaveLength(1);
-      expect(seen[0]!.control?.traceId).toBe("trace-xyz");
+      expect(seen[0]!.traceId).toBe("trace-xyz");
     });
   });
 

@@ -10,6 +10,8 @@ class GreeterService {
 }
 
 class MathService {
+  readonly pi: number = Math.PI;
+
   add(a: number, b: number): number {
     return a + b;
   }
@@ -18,19 +20,31 @@ class MathService {
     return a * b;
   }
 
-  async *count(start: number, end: number): AsyncIterableIterator<number> {
-    for (let i = start; i < end; i++) {
-      yield i;
-      // Yield back to the microtask queue so incoming CANCEL
-      // packets can be processed between emissions.
-      await new Promise<void>((r) => setTimeout(r, 0));
+  async *prime(start: number = 2): AsyncIterableIterator<number> {
+    let n = Math.max(2, Math.floor(start));
+    while (true) {
+      if (isPrime(n)) yield n;
+      n++;
     }
   }
+}
+
+function isPrime(n: number): boolean {
+  if (n < 2) return false;
+  if (n === 2) return true;
+  if (n % 2 === 0) return false;
+  for (let i = 3; i * i <= n; i += 2) {
+    if (n % i === 0) return false;
+  }
+  return true;
 }
 
 type ExampleEvents = { test: [query?: string] };
 class EventService {
   readonly emitter = new EventEmitter();
+  get eventNames(): string[] {
+    return this.emitter.eventNames().map(String);
+  }
 
   on<TEventName extends keyof ExampleEvents>(
     event: TEventName,

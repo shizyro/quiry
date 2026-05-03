@@ -10,6 +10,7 @@ import {
   type InvocationId,
   type RequestControl,
   type RetryPolicy,
+  type TraceId,
 } from "@/interface/base";
 
 import {
@@ -29,6 +30,7 @@ import {
   type CallbackReturnPacket,
   type CallRequestPacket,
   type CancelRequestPacket,
+  type GetRequestPacket,
   type HandshakePayload,
   type PacketByKind,
   type StreamResponsePacket,
@@ -45,7 +47,7 @@ import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/sha
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
 import { nanoid } from "nanoid";
-import { isSerializable, clip } from "@/lib/helpers";
+import { isSerializable, clip, isAnyIterable } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
 import { InFlightTracker } from "@/lib/tracker";
 import sizeof from "object-sizeof";
@@ -91,9 +93,9 @@ export type InquiryFunc = (request: InquiryRequest) => Promise<unknown> | AsyncI
 export type InquiryRequest = Readonly<{
   id: CorrelationId;
   service: string;
-  method: string;
+  property: string;
   args: ReadonlyArray<unknown>;
-  control?: RequestControl;
+  traceId?: TraceId;
 }>;
 
 interface PendingCallRequest<T = unknown> {
@@ -110,6 +112,12 @@ interface PendingStreamRequest {
   readonly credit: { remaining: number };
   timer?: ReturnType<typeof setTimeout>;
   seq: number;
+}
+
+interface PendingGetRequest<T = unknown> {
+  readonly kind: "get";
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
 }
 
 /**
@@ -169,7 +177,10 @@ export class Session<Ready extends boolean = boolean> {
   private readonly outbound = new InFlightTracker();
   private readonly callbacks = new CallbackRegistry();
 
-  readonly #pending_requests = new Map<CorrelationId, PendingCallRequest | PendingStreamRequest>();
+  readonly #pending_requests = new Map<
+    CorrelationId,
+    PendingCallRequest | PendingStreamRequest | PendingGetRequest
+  >();
   readonly #outbound_streams = new Map<CorrelationId, OutboundStream>();
 
   readonly #inflight_invocations = new Map<CorrelationId, number>();
@@ -493,6 +504,55 @@ export class Session<Ready extends boolean = boolean> {
   }
 
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
+
+  async get(service: string, property: string): Promise<unknown> {
+    if (this.#state !== "open") {
+      throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
+    }
+
+    const correlation = nanoid() as CorrelationId;
+    const body = {
+      id: correlation,
+      kind: WireKind.REQUEST,
+      type: RequestMessageType.GET,
+      from: localNodeId,
+      timestamp: Date.now(),
+      payload: { service, property },
+    } satisfies GetRequestPacket;
+
+    return new Promise((resolve, reject) => {
+      const cleanup = (): void => {
+        if (this.#pending_requests.delete(correlation)) this.outbound.exit();
+      };
+
+      this.#pending_requests.set(correlation, {
+        kind: "get",
+        resolve: (value: unknown): void => {
+          cleanup();
+          resolve(value);
+        },
+        reject: (error: Error): void => {
+          cleanup();
+          reject(error);
+        },
+      });
+
+      this.outbound.enter();
+
+      Promise.resolve(this.forward(body)).catch((cause: unknown) => {
+        this.logger?.warn(
+          `Failed to send packet ${clip(body.id)}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        cleanup();
+        reject(
+          new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", {
+            correlationId: correlation,
+            cause,
+          }),
+        );
+      });
+    });
+  }
 
   /**
    * Unary RPC with optional retries ({@link isRetryableStatus}), timeout, and `AbortSignal` -> `ABORT` on wire.
@@ -961,7 +1021,7 @@ export class Session<Ready extends boolean = boolean> {
 
     const context = {
       correlationId: packet.id,
-      traceId: packet.payload.control?.traceId,
+      traceId: "control" in packet.payload ? packet.payload.control?.traceId : undefined,
     };
 
     this.inbound.run(async () => {
@@ -978,6 +1038,7 @@ export class Session<Ready extends boolean = boolean> {
       }
 
       if (
+        "control" in packet.payload &&
         packet.payload.control?.timeout !== undefined &&
         packet.timestamp >= Date.now() + packet.payload.control.timeout
       ) {
@@ -1000,47 +1061,46 @@ export class Session<Ready extends boolean = boolean> {
       const request = {
         id: packet.id,
         service: packet.payload.service,
-        method: packet.payload.method,
-        args: this.restoreStubs(packet.payload.args, packet.id),
-        control: packet.payload.control,
+        property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
+        args: "args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : [],
+        traceId: "control" in packet.payload ? packet.payload.control?.traceId : undefined,
       } satisfies InquiryRequest;
 
       let controller: AbortController | undefined;
-      if (packet.payload.control?.abortable) {
+      if ("control" in packet.payload && packet.payload.control?.abortable) {
         controller = new AbortController();
         this.#controllers.set(packet.id, controller);
       }
 
       try {
         const result = this.inquiry(request);
-        const isIterable = typeof result === "object" && result !== null && Symbol.asyncIterator in result;
 
-        const value = !isIterable
-          ? await abortable(
-              timeout(
-                result,
-                (packet.payload.control?.timeout ?? this.config.defaultTimeout) -
-                  (Date.now() - packet.timestamp),
-                "Timeout waiting for inquiry response",
-              ),
-              controller?.signal,
-            ).finally(() => controller && this.#controllers.delete(packet.id))
-          : result;
-
-        // Streaming results must be detected *before* the serialization
-        // check: async iterators have a non-plain prototype and would
-        // otherwise be rejected as non-serializable. Individual chunks are
-        // validated as they are pulled from the iterator.
-        if (isIterable) {
-          await this.streamOutboundResponse(packet.id, value as AsyncIterableIterator<unknown>);
+        if (isAnyIterable(result)) {
+          // Streaming results must be detected *before* the serialization
+          // check: async iterators have a non-plain prototype and would
+          // otherwise be rejected as non-serializable. Individual chunks are
+          // validated as they are pulled from the iterator.
+          await this.streamOutboundResponse(packet.id, result);
         } else {
+          const value = await abortable(
+            timeout(
+              result,
+              ("control" in packet.payload && packet.payload.control?.timeout !== undefined
+                ? packet.payload.control.timeout
+                : this.config.defaultTimeout) -
+                (Date.now() - packet.timestamp),
+              "Timeout waiting for inquiry response",
+            ),
+            controller?.signal,
+          ).finally(() => controller && this.#controllers.delete(packet.id));
+
           if (!isSerializable(value))
             throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
               ...context,
               detail: { value },
             });
 
-          return await this.send({
+          await this.send({
             kind: WireKind.RESPONSE,
             type: ResponseMessageType.VALUE,
             payload: {
@@ -1203,7 +1263,7 @@ export class Session<Ready extends boolean = boolean> {
       return;
     }
 
-    clearTimeout(entry.timer);
+    clearTimeout("timer" in entry ? entry.timer : undefined);
     this.#pending_requests.delete(ref);
     this.outbound.exit();
 
@@ -1225,7 +1285,7 @@ export class Session<Ready extends boolean = boolean> {
     }
 
     this.logger?.debug(
-      `Request ${clip(ref)} completed with status ${status} in ${Date.now() - entry.timestamp}ms`,
+      `Request ${clip(ref)} completed with status ${status}${"timestamp" in entry ? ` in ${Date.now() - entry.timestamp}ms` : ""}`,
     );
   }
 
@@ -1342,8 +1402,8 @@ export class Session<Ready extends boolean = boolean> {
 
   private rejectAllPending(error: Error): void {
     for (const request of this.#pending_requests.values()) {
-      if (request.kind === "call") request.reject(error);
-      else request.queue.fail(error);
+      if (request.kind === "stream") request.queue.fail(error);
+      else request.reject(error);
     }
     this.#pending_requests.clear();
 

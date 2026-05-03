@@ -39,7 +39,7 @@ describe("Session requests", () => {
       expect(inquiry).toHaveBeenCalledTimes(1);
       const arg = inquiry.mock.calls[0]![0] as InquiryRequest;
       expect(arg.service).toBe("orders");
-      expect(arg.method).toBe("create");
+      expect(arg.property).toBe("create");
       expect(arg.args).toEqual(["sku-1", 3, { gift: true }]);
       expect(typeof arg.id).toBe("string");
     });
@@ -48,7 +48,7 @@ describe("Session requests", () => {
       let captured: string | undefined;
       pair = await openSessionPair({
         producerInquiry: async (req) => {
-          captured = req.control?.traceId;
+          captured = req.traceId;
           return null;
         },
       });

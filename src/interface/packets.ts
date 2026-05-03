@@ -25,7 +25,7 @@ type WithRef<T = {}, Nullable extends boolean = false> = T & {
 
 // --------- REQUEST PACKETS --------- //
 
-export const RequestMessageType = { CALL: "call", ABORT: "abort", CANCEL: "cancel" } as const;
+export const RequestMessageType = { CALL: "call", ABORT: "abort", CANCEL: "cancel", GET: "get" } as const;
 export type RequestMessageType = (typeof RequestMessageType)[keyof typeof RequestMessageType];
 
 export type CallPayload = {
@@ -54,6 +54,14 @@ export type CancelPayload = WithRef;
 /** A request to cancel an ongoing stream operation. */
 export interface CancelRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.CANCEL, CancelPayload> {}
+
+export type GetPayload = {
+  readonly service: string;
+  readonly property: string;
+};
+
+export interface GetRequestPacket
+  extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.GET, GetPayload> {}
 
 // --------- RESPONSE PACKETS --------- //
 
@@ -232,7 +240,11 @@ export type AnySystemPacket =
   | SystemHeartbeatPacket
   | SystemDrainPacket
   | SystemDrainAckPacket;
-export type AnyRequestPacket = CallRequestPacket | AbortRequestPacket | CancelRequestPacket;
+export type AnyRequestPacket =
+  | CallRequestPacket
+  | AbortRequestPacket
+  | CancelRequestPacket
+  | GetRequestPacket;
 export type AnyResponsePacket = ValueResponsePacket | StreamResponsePacket;
 export type AnyCallbackPacket = CallbackInvokePacket | CallbackReturnPacket | CallbackReleasePacket;
 

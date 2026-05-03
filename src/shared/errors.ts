@@ -137,7 +137,7 @@ export class QuiryError extends Error {
     if (this.traceId) meta.push(`trace=${this.traceId}`);
     if (this.retryable) meta.push("retryable");
 
-    const header = `${this.name}: ${this.message} [${meta.join(", ")}]`;
+    const header = `\u001b[91m${this.name}: ${this.message} [${meta.join(", ")}]\u001b[39m`;
     const stack = this.stack?.split("\n").slice(1).join("\n") ?? "";
     const detail =
       this.detail && Object.keys(this.detail).length > 0
@@ -253,7 +253,7 @@ function stripStackHeader(stack: string): string {
  *
  * `skip` is the function whose frame (and everything below) should be omitted.
  */
-export function captureCallerStack(skip: Function): string {
+export function captureCallerStack(skip?: Function): string {
   const holder: { stack?: string } = {};
   if (typeof Error.captureStackTrace === "function") {
     Error.captureStackTrace(holder, skip);

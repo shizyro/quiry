@@ -153,6 +153,11 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     return this;
   }
 
+  /** Resolves to the value of a remote property. */
+  async get(service: string, property: string): Promise<unknown> {
+    return this.session.get(service, property);
+  }
+
   /**
    * Sends a unary RPC request to the remote service. Supporting both spread and explicit array arguments.
    */
@@ -186,32 +191,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
   service<TName extends keyof TServices>(identifier: TName): RemoteServiceDefinition<TServices[TName]> {
     let proxy = this.cache.get(identifier);
     if (!proxy) {
-      proxy = new Proxy({} as RemoteServiceDefinition<TServices[TName]>, {
-        get: (_, prop) => {
-          if (typeof prop !== "string") return undefined;
-          const dispatch = (...args: unknown[]) => {
-            // Captured here (not inside `route`) so the top frame is
-            // the actual user code that invoked the service method,
-            // not any of the Proxy/dispatch plumbing.
-            const callerStack = captureCallerStack(dispatch);
-            const [positional, options] = splitArgsAndOptions(args);
-            // The returned value is dual-nature, awaiting it routes to
-            // a unary request; iterating it opens a server stream. The
-            // RemoteMethod<T> type already narrows to one or the
-            // other on a per-method basis, so the caller sees the
-            // correct shape and the wrong usage is statically blocked.
-            return makeCallOrStream(
-              identifier as string,
-              prop,
-              positional,
-              this.session,
-              options,
-              callerStack,
-            );
-          };
-          return dispatch;
-        },
-      });
+      proxy = makeServiceProxy(identifier as string, this.session);
       this.cache.set(identifier, proxy);
     }
     return proxy as RemoteServiceDefinition<TServices[TName]>;
@@ -221,16 +201,9 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     identifier: TName,
     control: RequestControl,
   ): RemoteServiceDefinition<TServices[TName]> {
-    return new Proxy({} as RemoteServiceDefinition<TServices[TName]>, {
-      get: (_, prop) => {
-        if (typeof prop !== "string") return undefined;
-        const dispatch = (...args: unknown[]) => {
-          const callerStack = captureCallerStack(dispatch);
-          return makeCallOrStream(identifier as string, prop, args, this.session, control, callerStack);
-        };
-        return dispatch;
-      },
-    });
+    return makeServiceProxy(identifier as string, this.session, control) as RemoteServiceDefinition<
+      TServices[TName]
+    >;
   }
 
   /**
@@ -303,6 +276,55 @@ export interface WorkerStatus {
   // ...
 }
 
+function makeServiceProxy(service: string, session: Session, control?: RequestControl): object {
+  const callerStack = captureCallerStack(makeServiceProxy); // Not sure about this...
+  return new Proxy(Object.create(null), {
+    get(_, key: string) {
+      // Only created when .then/.catch/.finally is accessed (lazy),
+      // i.e. when the developer writes `await proxy.name` without calling it
+      let getter: Promise<unknown> | null = null;
+      const opt = (): Promise<unknown> => {
+        return (getter ??= session.get(service, key).catch((error: unknown) => {
+          attachCallerStack(error, callerStack);
+          return Promise.reject(error);
+        }));
+      };
+
+      return new Proxy(function () {} as unknown as object, {
+        apply(_, __, args: unknown[]) {
+          return makeCallOrStream(service, key, args, session, control, callerStack);
+        },
+        get(_, prop) {
+          switch (prop) {
+            case "then":
+              return <TResult1 = unknown, TResult2 = never>(
+                onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
+                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+              ): Promise<TResult1 | TResult2> => opt().then(onfulfilled, onrejected);
+
+            case "catch":
+              return <TResult = never>(
+                onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null,
+              ): Promise<unknown | TResult> => opt().catch(onrejected);
+
+            case "finally":
+              return (onfinally?: (() => void) | undefined | null): Promise<unknown> =>
+                opt().finally(onfinally);
+
+            default:
+              throw new QuiryError(
+                WireStatus.FAILED_PRECONDITION,
+                "Remote properties must be used with `await` keyword",
+              );
+          }
+        },
+      });
+    },
+    set(_, prop, value) {
+      throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Remote properties are read-only");
+    },
+  });
+}
 /**
  * A lazy handle returned by the service proxy that commits to either a
  * unary request or a server-stream on first use.
@@ -326,7 +348,7 @@ function makeCallOrStream<T = unknown>(
   args: unknown[],
   session: Session,
   control?: RequestControl,
-  stack: string = "",
+  stack?: string,
 ): CallOrStream<T> {
   let mode: QueryMode = QueryMode.PENDING;
   let call: Promise<unknown>;

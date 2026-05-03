@@ -9,6 +9,10 @@ async function bootstrap() {
     process.exit(0);
   });
 
+  broker.on("peer-disconnected", (handle) => {
+    console.log(`\u001b[105m Worker ${handle.id} disconnected \u001b[49m`);
+  });
+
   await broker.spawn(join(__dirname, "worker.ts"));
 }
 

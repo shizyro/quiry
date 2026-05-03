@@ -25,7 +25,7 @@ import { HeartbeatStatus, WireKind, WireStatus, type MetricsData, type NodeId } 
 import type { ServiceRegistry } from "@/interface/transformers";
 
 import { QuiryError } from "@/shared/errors";
-import { clip } from "@/lib/helpers";
+import { clip, isPrimitive, isSerializable } from "@/lib/helpers";
 
 export interface PeerHandle {
   readonly id: NodeId;
@@ -326,33 +326,55 @@ export class Broker<TServices extends ServiceRegistry> extends EventEmitter<Brok
 
   private inquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
     this.logger?.trace(`Received inquiry request with id ${clip(request.id)}`);
-    const impl = this.services.get(request.service);
-    if (!impl) {
-      throw new QuiryError(WireStatus.NOT_FOUND, `Service ${request.service} not found`, {
-        correlationId: request.id,
-        traceId: request.control?.traceId,
-        detail: { query: { service: request.service, method: request.method } },
-      });
-    }
+    const context = {
+      correlationId: request.id,
+      detail: { query: { service: request.service, property: request.property } },
+      traceId: request.traceId,
+    };
 
-    if (!(request.method in impl) || typeof impl[request.method as keyof typeof impl] !== "function") {
+    const impl = this.services.get(request.service);
+    if (!impl) throw new QuiryError(WireStatus.NOT_FOUND, `Service ${request.service} not found`, context);
+    if (!(request.property in impl)) {
       throw new QuiryError(
         WireStatus.NOT_FOUND,
-        `Method ${request.method} not found in service ${request.service}`,
-        {
-          correlationId: request.id,
-          traceId: request.control?.traceId,
-          detail: { query: { service: request.service, method: request.method } },
-        },
+        `Property ${request.property} does not exist in service ${request.service}`,
+        context,
       );
     }
 
+    const prop = impl[request.property as keyof typeof impl] as unknown;
+    // Property GET — key exists but is not a function
+    if (typeof prop !== "function") {
+      if (!isSerializable(prop)) {
+        throw new QuiryError(
+          WireStatus.MALFORMED_RESPONSE,
+          "Cannot get a non-serializable property",
+          context,
+        );
+      }
+
+      return Promise.resolve(prop);
+    }
+
     this.logger?.trace(
-      `Invoking method ${request.service}.${request.method} with ${request.args.length} arguments`,
+      `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
     );
 
-    const fn = impl[request.method as keyof typeof impl] as (...args: unknown[]) => Promise<unknown>;
-    return fn.apply(impl, request.args as unknown[]);
+    let result: unknown;
+    try {
+      result = prop.apply(impl, request.args as unknown[]);
+    } catch (error: unknown) {
+      return Promise.reject(
+        new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
+      );
+    }
+
+    if (typeof result === "object" && result !== null) {
+      if (Symbol.asyncIterator in result) return result as AsyncIterableIterator<unknown>;
+      if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
+    }
+
+    return Promise.resolve(result);
   }
 
   // --------- INTERNALS: HEARTBEAT MONITOR --------- //

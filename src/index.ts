@@ -7,8 +7,7 @@ export { WireStatus, HeartbeatStatus, type MetricsData } from "@/interface/base"
 export { QuiryError } from "@/shared/errors";
 
 import type { Broker } from "@/core/broker";
-import type { MappedServiceRegistry } from "@/interface/transformers";
 /** Maps a `Broker<Registry>` (or `never` if `T` is not a broker) to the worker-facing remote registry type. */
-export type InferServiceRegistry<T> = MappedServiceRegistry<T extends Broker<infer R> ? R : never>;
+export type InferServiceRegistry<T> = T extends Broker<infer R> ? R : never;
 
 export { localNodeId } from "@/shared";

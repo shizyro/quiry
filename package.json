@@ -18,6 +18,7 @@
   "license": "MIT",
   "scripts": {
     "build": "bunchee --sourcemap --target es2022",
+    "example": "bun examples/basic/index.ts",
     "test": "vitest"
   },
   "devDependencies": {

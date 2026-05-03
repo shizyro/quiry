@@ -2,6 +2,10 @@ import { Worker } from "@/core/client";
 import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
 import type { AppRegistry } from "./provider";
 
+function log(message: string) {
+  console.log(`\u001b[2m${new Date().toISOString()}\u001b[22m ${message}`);
+}
+
 async function main() {
   const client = await new Worker<AppRegistry>(new WorkerThreadsTransport()).open();
 
@@ -9,20 +13,22 @@ async function main() {
     void client.service("greeter").greet("World");
 
     const math = client.service("math");
-    await math.add(1, 2).then((result) => console.log(`1 + 2 = ${result}`));
-    const result = await math.multiply(3, 4);
-    console.log(`3 x 4 = ${result}`);
+    const result = await math.multiply(3, 4); // unary calls
+    log(`3 x 4 = ${result}`);
+    // object property access
+    log(`PI (remote): ${await math.pi}`);
 
     const received = [];
-    for await (const number of client.service("math").count(0, 10)) {
+    // async iterator streaming
+    for await (const number of client.service("math").prime()) {
       received.push(number);
-      if (received.length > 5) break; // cancel the stream
+      if (number > 100) break;
     }
-    console.log(`Stream Result: ${received.join(", ")}`);
+    log(`Stream results: [${received.splice(0, 3).join(", ")}, ..., ${received.splice(-3).join(", ")}]`);
 
     // support for functional arguments
     void client.service("timer").delay(() => {
-      console.log("\n\tHello, from the other side! One second later!\n");
+      log("Hello, from the other side! One second later!");
     }, 1000); // callbacks are automatically "released" on the remote side after invocation
 
     const events = client.service("events");
@@ -30,17 +36,11 @@ async function main() {
       // long-lived callback - must be manually released with the `.release()` method,
       // or be automatically disposed out of scope with the `using` (TC39) keyword.
       await using handle = client.callback((query?: string) => {
-        console.log(`\n\tScoped callback invoked with query: ${query}\n`);
+        log(`Scoped callback invoked with query: ${query}`);
       });
 
-      events
-        .on("test", handle)
-        .catch((error: unknown) =>
-          console.log(
-            "Couldn't add callback to events:",
-            error instanceof Error ? error.message : String(error),
-          ),
-        );
+      events.on("test", handle);
+      log(`Event names: ${await events.eventNames}`); // remote getters
 
       await new Promise((resolve) => setTimeout(resolve, 2000)).then(() =>
         events.emit("test", "You shall pass!"),

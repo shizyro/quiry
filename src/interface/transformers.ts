@@ -57,19 +57,9 @@ type RemotableKey<T, K extends keyof T> = K extends string // string keys only, 
   : never;
 
 export type RemotableKeys<T> = { [K in keyof T]: RemotableKey<T, K> }[keyof T];
-
-/**
- * Primitive-valued properties that are safe to cache at handshake time and
- * expose local reads on the proxy.
- *
- * Values are snapshotted at handshake and do not reflect subsequent changes.
- */
-export interface RemoteReadable<P extends Record<string, Primitive>> {
-  readonly __remote_readable__: P; // phantom marker, never exists at runtime
-}
-
-type Primitive = string | number | boolean | null | undefined;
-type ReadableProps<T> = T extends RemoteReadable<infer P> ? P : {};
+export type ReadableProps<T> = Readonly<{
+  [K in keyof T as T[K] extends Serializable ? K : never]: Promise<T[K]>;
+}>;
 
 // Full service proxy type
 
