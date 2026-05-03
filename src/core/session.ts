@@ -4,11 +4,12 @@ import type { BackpressureSignal, Transport, TransportError } from "@/core/trans
 import {
   WireKind,
   WireStatus,
+  type NodeId,
   type CallbackId,
   type CorrelationId,
   type InvocationId,
-  type NodeId,
   type RequestControl,
+  type RetryPolicy,
 } from "@/interface/base";
 
 import {
@@ -140,6 +141,7 @@ export interface SessionConfig {
   readonly defaultTimeout?: number;
   readonly drainTimeout?: number;
   readonly creditWindow?: number;
+  readonly defaultRetry?: RetryPolicy;
 }
 
 export interface SessionEvents {
@@ -160,7 +162,7 @@ export class Session<Ready extends boolean = boolean> {
   #state: SessionState = "peering";
   #connectedAt: number = -1;
 
-  private readonly config: Required<SessionConfig>;
+  private readonly config: DeepRequired<SessionConfig>;
   private readonly router: Router<AnyPacket>;
 
   private readonly inbound = new InFlightTracker();
@@ -189,6 +191,11 @@ export class Session<Ready extends boolean = boolean> {
       defaultTimeout: config.defaultTimeout ?? 10_000,
       drainTimeout: config.drainTimeout ?? 5000,
       creditWindow: config.creditWindow ?? 100,
+      defaultRetry: {
+        maxAttempts: config.defaultRetry?.maxAttempts ?? 3,
+        delay: config.defaultRetry?.delay ?? 1000,
+        backoffStrategy: config.defaultRetry?.backoffStrategy ?? "exponential",
+      },
     };
   }
 
@@ -611,8 +618,9 @@ export class Session<Ready extends boolean = boolean> {
           });
         }),
       {
-        retries: control?.retry?.maxAttempts ?? 3,
-        initialDelay: control?.retry?.delay ?? 1000,
+        retries: control?.retry?.maxAttempts ?? this.config.defaultRetry.maxAttempts,
+        initialDelay: control?.retry?.delay ?? this.config.defaultRetry.delay,
+        backoffStrategy: control?.retry?.backoffStrategy ?? this.config.defaultRetry.backoffStrategy,
         shouldRetry: (error: unknown) => (error instanceof QuiryError ? isRetryableStatus(error.code) : true),
         signal,
       },

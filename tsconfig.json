@@ -13,6 +13,8 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
 
+    "experimentalDecorators": true,
+
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "noImplicitOverride": true,

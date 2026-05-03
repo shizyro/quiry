@@ -103,7 +103,7 @@ export interface RequestControl {
 
 export interface RetryPolicy {
   readonly maxAttempts?: number;
-  readonly backoff?: "fixed" | "exponential";
+  readonly backoffStrategy?: "fixed" | "exponential";
   readonly delay?: number;
 }
 

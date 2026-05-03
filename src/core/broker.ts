@@ -1,4 +1,5 @@
 import EventEmitter from "node:events";
+import { Singleton } from "@/shared/decorators";
 
 import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 import { fork, type ForkOptions } from "node:child_process";
@@ -69,8 +70,11 @@ export interface BrokerEvents {
 
 /**
  * Host-side registry: exposes services, attaches worker transports, runs identify + heartbeat.
+ * Singleton per process; use {@link Broker.instance} or `new Broker()` interchangeably after import.
  */
+@Singleton
 export class Broker<TServices extends ServiceRegistry> extends EventEmitter<BrokerEvents> {
+  static readonly instance: InstanceType<typeof Broker>;
   private readonly config: DeepRequired<Omit<BrokerConfig, "session">> & Pick<BrokerConfig, "session">;
 
   private readonly services = new Map<keyof TServices, object>();

@@ -1,4 +1,5 @@
 import EventEmitter from "node:events";
+import { Singleton } from "@/shared/decorators";
 
 import {
   Session,
@@ -54,11 +55,15 @@ export interface WorkerEvents {
 
 /**
  * Worker-side peer: one {@link Session} per transport, answers identify, sends heartbeats,
- * and exposes typed service proxies.
+ * and exposes typed service proxies. Singleton per process like {@link Broker}.
  */
+@Singleton
 export class Worker<TServices extends ServiceRegistry> extends EventEmitter<WorkerEvents> {
+  static readonly instance: InstanceType<typeof Worker>;
   private readonly config: DeepRequired<Omit<WorkerConfig, "session">> & Pick<WorkerConfig, "session">;
+
   private readonly session: Session;
+  private readonly cache = new Map<keyof TServices, object>();
 
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #isShuttingDown: boolean = false;
@@ -179,21 +184,49 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
    * (await vs async-iteration) with mutual exclusion enforced at runtime — see {@link CallOrStream}.
    */
   service<TName extends keyof TServices>(identifier: TName): RemoteServiceDefinition<TServices[TName]> {
+    let proxy = this.cache.get(identifier);
+    if (!proxy) {
+      proxy = new Proxy({} as RemoteServiceDefinition<TServices[TName]>, {
+        get: (_, prop) => {
+          if (typeof prop !== "string") return undefined;
+          const dispatch = (...args: unknown[]) => {
+            // Captured here (not inside `route`) so the top frame is
+            // the actual user code that invoked the service method,
+            // not any of the Proxy/dispatch plumbing.
+            const callerStack = captureCallerStack(dispatch);
+            const [positional, options] = splitArgsAndOptions(args);
+            // The returned value is dual-nature, awaiting it routes to
+            // a unary request; iterating it opens a server stream. The
+            // RemoteMethod<T> type already narrows to one or the
+            // other on a per-method basis, so the caller sees the
+            // correct shape and the wrong usage is statically blocked.
+            return makeCallOrStream(
+              identifier as string,
+              prop,
+              positional,
+              this.session,
+              options,
+              callerStack,
+            );
+          };
+          return dispatch;
+        },
+      });
+      this.cache.set(identifier, proxy);
+    }
+    return proxy as RemoteServiceDefinition<TServices[TName]>;
+  }
+
+  controlled<TName extends keyof TServices>(
+    identifier: TName,
+    control: RequestControl,
+  ): RemoteServiceDefinition<TServices[TName]> {
     return new Proxy({} as RemoteServiceDefinition<TServices[TName]>, {
       get: (_, prop) => {
         if (typeof prop !== "string") return undefined;
         const dispatch = (...args: unknown[]) => {
-          // Captured here (not inside `route`) so the top frame is
-          // the actual user code that invoked the service method,
-          // not any of the Proxy/dispatch plumbing.
           const callerStack = captureCallerStack(dispatch);
-          const [positional, options] = splitArgsAndOptions(args);
-          // The returned value is dual-nature, awaiting it routes to
-          // a unary request; iterating it opens a server stream. The
-          // RemoteMethod<T> type already narrows to one or the
-          // other on a per-method basis, so the caller sees the
-          // correct shape and the wrong usage is statically blocked.
-          return this.route(identifier as string, prop, positional, options, callerStack);
+          return makeCallOrStream(identifier as string, prop, args, this.session, control, callerStack);
         };
         return dispatch;
       },
@@ -233,88 +266,7 @@ export class Worker<TServices extends ServiceRegistry> extends EventEmitter<Work
     this.logger?.info(`Worker shutdown complete in ${Date.now() - start}ms`);
   }
 
-  private route<T = unknown>(
-    service: string,
-    method: string,
-    args: unknown[],
-    options?: RequestControl,
-    stack: string = "",
-  ): CallOrStream<T> {
-    let mode: QueryMode = QueryMode.PENDING;
-    let call: Promise<unknown>;
-    let iter: AsyncIterableIterator<unknown>;
-
-    const tag = <E>(error: E): E => {
-      if (stack) attachCallerStack(error, stack);
-      return error;
-    };
-
-    const run = (): Promise<unknown> => {
-      if (mode === QueryMode.STREAM)
-        throw new Error(
-          `Cannot await ${service}.${method}(...) — it has already been committed as a stream.`,
-        );
-
-      mode = QueryMode.CALL;
-      return (call ??= this.session
-        .request(service, method, args, options)
-        .catch((error: unknown) => Promise.reject(tag(error))));
-    };
-
-    const flow = (): AsyncIterableIterator<unknown> => {
-      if (mode === QueryMode.CALL)
-        throw new Error(
-          `Cannot iterate ${service}.${method}(...) — it has already been committed as a unary call.`,
-        );
-
-      mode = QueryMode.STREAM;
-      if (iter) return iter;
-
-      const source = this.session.stream(service, method, args, options);
-      iter = {
-        [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
-          return this;
-        },
-        next: (...x): Promise<IteratorResult<unknown>> =>
-          source.next(...x).catch((error: unknown) => Promise.reject(tag(error))),
-        return: (value?: unknown): Promise<IteratorResult<unknown>> =>
-          source.return ? source.return(value) : Promise.resolve({ value: undefined, done: true }),
-        throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
-          source.throw ? source.throw(err) : Promise.reject(err),
-      };
-      return iter;
-    };
-
-    // Auto-trigger to call mode if no stream was engaged.
-    //! I'm assuming this is risky in terms of semantic predictability...
-    //! While its technically safe, it's behaviorally fragile; race conditions may occur in async-delayed use.
-    // TODO: decide on a better solution, or perhaps work around it with proper documentation.
-    queueMicrotask(() => mode === QueryMode.PENDING && run());
-
-    // This object is deliberately awaitable so `proxy.method(...)` routes through the unary call path.
-    return {
-      // biome-ignore lint/suspicious/noThenProperty: intentional
-      then: <TResult1 = unknown, TResult2 = never>(
-        onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
-        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-      ): Promise<TResult1 | TResult2> => run().then(onfulfilled, onrejected),
-      catch: <TResult = never>(
-        onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null,
-      ): Promise<unknown | TResult> => run().catch(onrejected),
-      finally: (onfinally?: (() => void) | undefined | null): Promise<unknown> => run().finally(onfinally),
-
-      [Symbol.asyncIterator]: (): AsyncIterableIterator<unknown> => flow(),
-      next: (...x): Promise<IteratorResult<unknown>> => flow().next(...x),
-
-      // If the stream was never engaged, there's nothing to clean up.
-      return: (value?: unknown): Promise<IteratorResult<unknown>> =>
-        mode === QueryMode.STREAM && iter?.return
-          ? iter.return(value)
-          : Promise.resolve({ value: undefined, done: true }),
-      throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
-        mode === QueryMode.STREAM && iter?.throw ? iter.throw(err) : Promise.reject(err),
-    } as CallOrStream<T>;
-  }
+  // --------- INTERNALS --------- //
 
   private inquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
     // I suppose I could implement some kind of forwarded request that goes to here.
@@ -366,6 +318,88 @@ enum QueryMode {
   PENDING = 0,
   CALL,
   STREAM,
+}
+
+function makeCallOrStream<T = unknown>(
+  service: string,
+  method: string,
+  args: unknown[],
+  session: Session,
+  control?: RequestControl,
+  stack: string = "",
+): CallOrStream<T> {
+  let mode: QueryMode = QueryMode.PENDING;
+  let call: Promise<unknown>;
+  let iter: AsyncIterableIterator<unknown>;
+
+  const tag = <E>(error: E): E => {
+    if (stack) attachCallerStack(error, stack);
+    return error;
+  };
+
+  const run = (): Promise<unknown> => {
+    if (mode === QueryMode.STREAM)
+      throw new Error(`Cannot await ${service}.${method}(...) — it has already been committed as a stream.`);
+
+    mode = QueryMode.CALL;
+    return (call ??= session
+      .request(service, method, args, control)
+      .catch((error: unknown) => Promise.reject(tag(error))));
+  };
+
+  const flow = (): AsyncIterableIterator<unknown> => {
+    if (mode === QueryMode.CALL)
+      throw new Error(
+        `Cannot iterate ${service}.${method}(...) — it has already been committed as a unary call.`,
+      );
+
+    mode = QueryMode.STREAM;
+    if (iter) return iter;
+
+    const source = session.stream(service, method, args, control);
+    iter = {
+      [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
+        return this;
+      },
+      next: (...x): Promise<IteratorResult<unknown>> =>
+        source.next(...x).catch((error: unknown) => Promise.reject(tag(error))),
+      return: (value?: unknown): Promise<IteratorResult<unknown>> =>
+        source.return ? source.return(value) : Promise.resolve({ value: undefined, done: true }),
+      throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
+        source.throw ? source.throw(err) : Promise.reject(err),
+    };
+    return iter;
+  };
+
+  // Auto-trigger to call mode if no stream was engaged.
+  //! I'm assuming this is risky in terms of semantic predictability...
+  //! While its technically safe, it's behaviorally fragile; race conditions may occur in async-delayed use.
+  // TODO: decide on a better solution, or perhaps work around it with proper documentation.
+  queueMicrotask(() => mode === QueryMode.PENDING && run());
+
+  // This object is deliberately awaitable so `proxy.method(...)` routes through the unary call path.
+  return {
+    // biome-ignore lint/suspicious/noThenProperty: intentional
+    then: <TResult1 = unknown, TResult2 = never>(
+      onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ): Promise<TResult1 | TResult2> => run().then(onfulfilled, onrejected),
+    catch: <TResult = never>(
+      onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null,
+    ): Promise<unknown | TResult> => run().catch(onrejected),
+    finally: (onfinally?: (() => void) | undefined | null): Promise<unknown> => run().finally(onfinally),
+
+    [Symbol.asyncIterator]: (): AsyncIterableIterator<unknown> => flow(),
+    next: (...x): Promise<IteratorResult<unknown>> => flow().next(...x),
+
+    // If the stream was never engaged, there's nothing to clean up.
+    return: (value?: unknown): Promise<IteratorResult<unknown>> =>
+      mode === QueryMode.STREAM && iter?.return
+        ? iter.return(value)
+        : Promise.resolve({ value: undefined, done: true }),
+    throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
+      mode === QueryMode.STREAM && iter?.throw ? iter.throw(err) : Promise.reject(err),
+  } as CallOrStream<T>;
 }
 
 /**

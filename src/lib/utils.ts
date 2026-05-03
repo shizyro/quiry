@@ -22,7 +22,7 @@ export function retryable<T>(
   options: {
     retries?: number;
     initialDelay?: number;
-    backoffStrategy?: "linear" | "exponential";
+    backoffStrategy?: "fixed" | "exponential";
     shouldRetry?: (error: Error) => boolean;
     /**
      * Aborting interrupts an active backoff window — the next attempt is
