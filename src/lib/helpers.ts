@@ -62,19 +62,3 @@ export function isWirePacket(value: unknown): value is AnyPacket {
     "payload" in v
   );
 }
-
-/** @deprecated */
-export function getMemoryUsage() {
-  const usage = process.memoryUsage();
-  return {
-    heapUsed: usage.heapUsed,
-    heapTotal: usage.heapTotal,
-    external: usage.external,
-    rss: usage.rss,
-  };
-}
-
-/** A utility function that clips a string to a given length. Used for logging long IDs. */
-export function clip(text: string, length: number = 8): string {
-  return text.slice(0, length) + (text.length > length ? `[:${text.length - length}]` : "");
-}

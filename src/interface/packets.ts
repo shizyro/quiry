@@ -126,22 +126,35 @@ export interface StreamResponsePacket
 export const CallbackMessageType = { INVOKE: "invoke", RETURN: "return", RELEASE: "release" } as const;
 export type CallbackMessageType = (typeof CallbackMessageType)[keyof typeof CallbackMessageType];
 
-export type CallbackInvokePayload = WithRef<{
-  readonly eid: InvocationId;
-  readonly callback: CallbackId;
-  readonly args: ReadonlyArray<unknown>;
-}>;
+export type CallbackInvokePayload = WithRef<
+  {
+    readonly eid: InvocationId;
+    readonly callback: CallbackId;
+    readonly args: ReadonlyArray<unknown>;
+  },
+  true // null for session-scoped returned stubs
+>;
 
-export type CallbackReturnPayload = WithRef<{
-  readonly eid: InvocationId;
-  readonly callback: CallbackId;
-}> &
+export type CallbackReturnPayload = WithRef<
+  {
+    readonly eid: InvocationId;
+    readonly callback: CallbackId;
+  },
+  true
+> &
   (
     | { readonly status: typeof WireStatus.OK; readonly result: unknown }
     | { readonly status: Exclude<WireStatus, typeof WireStatus.OK>; readonly error: WireError }
   );
 
-export type CallbackReleasePayload = WithRef<{ readonly callbacks: ReadonlyArray<CallbackId> }, true>;
+export type CallbackReleasePayload = WithRef<
+  {
+    readonly callbacks: ReadonlyArray<CallbackId>;
+    /** Whether the callbacks were garbage collected. */
+    readonly gc?: boolean;
+  },
+  true
+>;
 
 export interface CallbackInvokePacket
   extends TypedWirePacket<

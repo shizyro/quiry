@@ -445,6 +445,12 @@ function makeCallOrStream<T = unknown>(
     ): Promise<unknown | TResult> => run().catch(onrejected),
     finally: (onfinally?: (() => void) | undefined | null): Promise<unknown> => run().finally(onfinally),
 
+    [Symbol.iterator]: (): IterableIterator<unknown> => {
+      throw new QuiryError(
+        WireStatus.FAILED_PRECONDITION,
+        "Remote iterators must be used with `await` keyword",
+      );
+    },
     [Symbol.asyncIterator]: (): AsyncIterableIterator<unknown> => flow(),
     next: (...x): Promise<IteratorResult<unknown>> => flow().next(...x),
 

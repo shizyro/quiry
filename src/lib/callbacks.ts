@@ -121,48 +121,50 @@ export class CallbackRegistry {
 
   /**
    * Substitute all functions reachable through the argument graph with callback stubs,
-   * register them under the given correlation ID, and return a transformed copy.
+   * register them under the given correlation ID (if any), and return a transformed copy.
    *
    * Walks arrays and plain objects recursively; class instances and other non-plain
    * objects are returned as-is (they wouldn't survive structured cloning anyway).
    * Already-substituted {@link Callback} stubs pass through untouched. Cycles are
    * detected and short-circuited.
    */
-  substitute(args: ReadonlyArray<unknown>, ref: CorrelationId): ReadonlyArray<unknown> {
+  substitute<T>(value: T, ref?: CorrelationId): T {
     const seen = new WeakMap<object, unknown>();
+    const scope = ref ? CallbackScope.LOCAL : CallbackScope.STACK;
 
-    const walk = (value: unknown): unknown => {
-      if (typeof value === "function") {
-        const id = this.register(value, CallbackScope.LOCAL, ref);
-        return { [stub]: true, id, scope: CallbackScope.LOCAL } satisfies Callback;
+    const walk = (block: unknown): unknown => {
+      if (typeof block === "function") {
+        // @ts-expect-error - `scope` is always `CallbackScope.LOCAL` or `CallbackScope.STACK`
+        const id = this.register(block, scope, ref);
+        return { [stub]: true, id, scope } satisfies Callback;
       }
 
-      if (value === null || typeof value !== "object") return value;
-      if (isCallbackStub(value)) return value;
+      if (block === null || typeof block !== "object") return block;
+      if (isCallbackStub(block)) return block;
 
-      const cached = seen.get(value as object);
+      const cached = seen.get(block as object);
       if (cached !== undefined) return cached;
 
-      if (Array.isArray(value)) {
-        const result: unknown[] = new Array(value.length);
-        seen.set(value as object, result);
-        for (let i = 0; i < value.length; i++) result[i] = walk(value[i]);
+      if (Array.isArray(block)) {
+        const result: unknown[] = new Array(block.length);
+        seen.set(block as object, result);
+        for (let i = 0; i < block.length; i++) result[i] = walk(block[i]);
         return result;
       }
 
-      if (isPlainObject(value)) {
+      if (isPlainObject(block)) {
         const result: Record<string, unknown> = {};
-        seen.set(value as object, result);
-        for (const [key, val] of Object.entries(value as object)) {
+        seen.set(block as object, result);
+        for (const [key, val] of Object.entries(block as object)) {
           result[key] = walk(val);
         }
         return result;
       }
 
-      return value;
+      return block;
     };
 
-    return args.map(walk);
+    return walk(value) as T;
   }
 
   get size(): number {

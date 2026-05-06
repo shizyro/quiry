@@ -47,7 +47,7 @@ import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/sha
 
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
-import { isSerializable, isAnyIterableIterator, clip } from "@/lib/helpers";
+import { isSerializable, isAnyIterableIterator } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
 import { InFlightTracker } from "@/lib/tracker";
 
@@ -134,7 +134,7 @@ interface OutboundStream<T = unknown> {
 
 interface PendingCallbackInvocation<T = unknown> {
   /** Original request correlation id under which this invocation was issued. */
-  readonly ref: CorrelationId;
+  readonly ref: CorrelationId | null; // null for session-scoped returned stubs
   resolve: (value: T) => void;
   reject: (error: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
@@ -220,6 +220,7 @@ export class Session {
   readonly #inflight_invocations = new Map<CorrelationId, number>();
   readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
+  readonly #finalization_registry: FinalizationRegistry<CallbackId>;
 
   readonly #controllers = new Map<CorrelationId, AbortController>();
 
@@ -240,6 +241,16 @@ export class Session {
         backoffStrategy: config.defaultRetry?.backoffStrategy ?? "exponential",
       },
     };
+
+    this.#finalization_registry = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
+      if (this.#state === SessionState.CLOSED) return;
+      this.logger?.debug(`Automatically releasing garbage collected callback ${clip(id)}`);
+      void this.send({
+        kind: WireKind.CALLBACK,
+        type: CallbackMessageType.RELEASE,
+        payload: { ref: null, callbacks: [id], gc: true },
+      } satisfies OmitStandardFields<CallbackReleasePacket>).catch(() => {});
+    });
   }
 
   /** Fills `id`, `from`, `timestamp`, then {@link Session.forward}. */
@@ -554,10 +565,10 @@ export class Session {
         detail: { args },
       });
 
-    {
+    if (this.logger) {
       const count = substitutes.reduce<number>((prev, curr) => prev + Number(isCallbackStub(curr)), 0);
       if (count > 0) {
-        this.logger?.trace(`Substituted ${count} callbacks for request ${clip(correlation)}`);
+        this.logger.trace(`Substituted ${count} callbacks for request ${clip(correlation)}`);
       }
     }
 
@@ -1038,10 +1049,11 @@ export class Session {
             controller?.signal,
           ).finally(() => controller && this.#controllers.delete(packet.id));
 
-          if (!isSerializable(value))
+          const substituted = this.callbacks.substitute(value);
+          if (!isSerializable(substituted))
             throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
               ...context,
-              detail: { value },
+              detail: { value: substituted },
             });
 
           await this.send({
@@ -1050,7 +1062,7 @@ export class Session {
             payload: {
               ref: packet.id,
               status: WireStatus.OK,
-              result: value,
+              result: substituted,
             },
           } satisfies OmitStandardFields<ValueResponsePacket>);
         }
@@ -1221,7 +1233,7 @@ export class Session {
       );
     }
 
-    if (status === WireStatus.OK) entry.resolve(packet.payload.result);
+    if (status === WireStatus.OK) entry.resolve(this.restoreStubs(packet.payload.result, null, true));
     else {
       // Reconstruct the remote error with its full cause chain.
       // The `origin` on the rebuilt error reflects the remote node.
@@ -1237,10 +1249,10 @@ export class Session {
     switch (packet.type) {
       case CallbackMessageType.INVOKE: {
         const { ref, eid, callback, args } = packet.payload;
-        this.#inflight_invocations.set(ref, (this.#inflight_invocations.get(ref) ?? 0) + 1);
+        if (ref) this.#inflight_invocations.set(ref, (this.#inflight_invocations.get(ref) ?? 0) + 1);
 
         const fn = this.callbacks.get(callback);
-        const context = { correlationId: ref };
+        const context = { correlationId: ref ?? undefined };
 
         try {
           if (!fn) {
@@ -1292,7 +1304,7 @@ export class Session {
             );
           });
         } finally {
-          this.decrementInflightInvocations(ref);
+          if (ref) this.decrementInflightInvocations(ref);
         }
 
         break;
@@ -1328,11 +1340,13 @@ export class Session {
           // Missing callback on release is idempotent and expected —
           // e.g. we released it locally first. Observable-only.
           const released = this.callbacks.release(callback);
-          if (released) {
-            this.logger?.trace(
+          if (released && this.logger) {
+            this.logger.trace(
               ref
                 ? `Released callback ${clip(callback)} for packet ${clip(ref)}`
-                : `Released out of scope callback ${clip(callback)}`,
+                : packet.payload.gc
+                  ? `Released garbage collected callback ${clip(callback)}`
+                  : `Released out of scope callback ${clip(callback)}`,
             );
           }
         }
@@ -1566,9 +1580,9 @@ export class Session {
    * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
    * Cycles are short-circuited via the `seen` map.
    */
-  private restoreStubs(args: ReadonlyArray<unknown>, ref: CorrelationId): ReadonlyArray<unknown> {
+  private restoreStubs<T>(value: T, ref: CorrelationId | null, finalize: boolean = false): T {
     const track = (stub: Callback): CallbackId => {
-      if (stub.scope === CallbackScope.STACK) return stub.id;
+      if (ref === null || stub.scope === CallbackScope.STACK) return stub.id;
       let set = this.#remote_stubs.get(ref);
       if (!set) {
         set = new Set();
@@ -1581,7 +1595,12 @@ export class Session {
     const seen = new WeakMap<object, unknown>();
 
     const walk = (value: unknown): unknown => {
-      if (isCallbackStub(value)) return this.makeRemoteCallback(track(value), ref, value.scope);
+      if (isCallbackStub(value)) {
+        const id = track(value);
+        const fn = this.makeRemoteCallback(id, ref, value.scope);
+        if (finalize) this.#finalization_registry.register(fn, id);
+        return fn;
+      }
       if (value === null || typeof value !== "object") return value;
 
       const cached = seen.get(value as object);
@@ -1607,7 +1626,7 @@ export class Session {
       return value;
     };
 
-    return args.map(walk);
+    return walk(value) as T;
   }
 
   /**
@@ -1622,7 +1641,7 @@ export class Session {
    */
   private makeRemoteCallback(
     callback: CallbackId,
-    ref: CorrelationId,
+    ref: CorrelationId | null,
     scope: CallbackScope,
   ): (...args: unknown[]) => Promise<unknown> {
     return (...args: unknown[]): Promise<unknown> => {
@@ -1643,7 +1662,7 @@ export class Session {
                 WireStatus.DEADLINE_EXCEEDED,
                 `Remote callback did not return within ${timeout}ms`,
                 {
-                  correlationId: ref,
+                  correlationId: ref ?? undefined,
                   detail: { callback, eid, timeout },
                 },
               ),
@@ -1679,7 +1698,7 @@ export class Session {
 
           reject(
             new QuiryError(WireStatus.DATA_LOSS, "Failed to send callback invocation", {
-              correlationId: ref,
+              correlationId: ref ?? undefined,
               cause: error,
             }),
           );
@@ -1755,4 +1774,9 @@ export interface SessionStatus {
   /** Stub ids tracked across all in-flight inbound requests. */
   readonly stubs: number;
   readonly backpressure: BackpressureSignal;
+}
+
+/** A utility function that clips a string to a given length. Used for logging long IDs. */
+function clip(text: string, length: number = 8): string {
+  return text.slice(0, length) + (text.length > length ? `[:${text.length - length}]` : "");
 }

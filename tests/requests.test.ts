@@ -434,9 +434,9 @@ describe("Session requests", () => {
       expect((err as QuiryError).message).toBe("boom");
     });
 
-    it("rejects with INTERNAL when the producer returns a non-serializable value", async () => {
+    it("rejects with INTERNAL when the producer returns a non-serializable (expect functions)", async () => {
       pair = await openSessionPair({
-        producerInquiry: async () => () => 42,
+        producerInquiry: async () => new ArrayBuffer(),
       });
 
       const err = await pair.consumer
