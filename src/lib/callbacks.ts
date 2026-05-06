@@ -1,6 +1,7 @@
-import { v4 as uuid } from "uuid";
 import { isPlainObject } from "@/lib/helpers";
 import type { CallbackId, CorrelationId } from "@/interface/base";
+
+import { nanoid } from "nanoid";
 
 /**
  * A symbol used to mark callback that aren't real local functions,
@@ -52,7 +53,7 @@ export class CallbackRegistry {
       throw new Error("A bound callback must be registered with a correlation ID.");
     }
 
-    const id = uuid() as CallbackId;
+    const id = nanoid() as CallbackId;
     const entry = { id, fn, scope, ref: ref! } satisfies CallbackEntry;
 
     this.#by_id.set(id, entry);
@@ -119,34 +120,49 @@ export class CallbackRegistry {
   }
 
   /**
-   * Substitute all functions in the given array with callback stubs, register them
-   * with the given correlation ID, and return the new array.
+   * Substitute all functions reachable through the argument graph with callback stubs,
+   * register them under the given correlation ID, and return a transformed copy.
+   *
+   * Walks arrays and plain objects recursively; class instances and other non-plain
+   * objects are returned as-is (they wouldn't survive structured cloning anyway).
+   * Already-substituted {@link Callback} stubs pass through untouched. Cycles are
+   * detected and short-circuited.
    */
   substitute(args: ReadonlyArray<unknown>, ref: CorrelationId): ReadonlyArray<unknown> {
-    return args.map((value: unknown) => {
+    const seen = new WeakMap<object, unknown>();
+
+    const walk = (value: unknown): unknown => {
       if (typeof value === "function") {
         const id = this.register(value, CallbackScope.LOCAL, ref);
         return { [stub]: true, id, scope: CallbackScope.LOCAL } satisfies Callback;
       }
 
+      if (value === null || typeof value !== "object") return value;
+      if (isCallbackStub(value)) return value;
+
+      const cached = seen.get(value as object);
+      if (cached !== undefined) return cached;
+
+      if (Array.isArray(value)) {
+        const result: unknown[] = new Array(value.length);
+        seen.set(value as object, result);
+        for (let i = 0; i < value.length; i++) result[i] = walk(value[i]);
+        return result;
+      }
+
       if (isPlainObject(value)) {
         const result: Record<string, unknown> = {};
+        seen.set(value as object, result);
         for (const [key, val] of Object.entries(value as object)) {
-          // One level deep only — functions nested inside nested objects are not substituted.
-          // TODO: decide on handling nested functions
-          result[key] =
-            typeof val === "function"
-              ? (() => {
-                  const id = this.register(val, CallbackScope.LOCAL, ref);
-                  return { [stub]: true, id, scope: CallbackScope.LOCAL } satisfies Callback;
-                })()
-              : val;
+          result[key] = walk(val);
         }
         return result;
       }
 
       return value;
-    });
+    };
+
+    return args.map(walk);
   }
 
   get size(): number {

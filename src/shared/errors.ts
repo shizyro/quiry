@@ -182,7 +182,7 @@ export function toWireError(
 
     if (depth + 1 >= MAX_CAUSE_DEPTH || err.cause === undefined) return details;
 
-    // Promote whatever cause we have into an L0xmError and recurse. `L0xmError.from`
+    // Promote whatever cause we have into an QuiryError and recurse. `QuiryError.from`
     // deliberately does NOT wrap a native error around itself, so the chain terminates
     // naturally once we hit a leaf cause with no further `cause` of its own.
     const nested = err.cause instanceof QuiryError ? err.cause : QuiryError.from(err.cause);

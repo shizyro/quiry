@@ -61,6 +61,7 @@ export function isWirePacket(value: unknown): value is AnyPacket {
   );
 }
 
+/** @deprecated */
 export function getMemoryUsage() {
   const usage = process.memoryUsage();
   return {

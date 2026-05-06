@@ -238,9 +238,7 @@ describe("Session requests", () => {
         code: WireStatus.UNAVAILABLE,
         message: "still down",
       });
-      // `retryable` interprets `maxAttempts` as additional retries on top of the
-      // initial call, so 2 means: 1 initial + 2 retries = 3 calls total.
-      expect(attempts).toBe(3);
+      expect(attempts).toBe(2);
     });
 
     it("respects a custom delay between retries", async () => {
@@ -255,7 +253,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 1, delay: 60 } }),
+        pair.consumer.request("_", "_", [], { retry: { maxAttempts: 2, delay: 60 } }),
       ).rejects.toMatchObject({ code: WireStatus.UNAVAILABLE });
 
       expect(attempts).toBe(2);

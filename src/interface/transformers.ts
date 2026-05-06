@@ -8,26 +8,22 @@
 type AnyFn = (...args: any[]) => any;
 type AnyConstructor = new (...args: any[]) => any;
 
-type IsFn<T> = T extends AnyFn ? true : false;
-type IsAsyncFn<T> = T extends (...args: any[]) => Promise<any> ? true : false;
 type IsAsyncIterFn<T> = T extends (...args: any[]) => AsyncIterable<any> ? true : false;
-type IsStreamingFn<T> = T extends AsyncIterableIterator<any> ? true : false;
-
-type IsSyncFn<T> = T extends AnyFn
-  ? IsAsyncFn<T> extends true
-    ? false
-    : IsAsyncIterFn<T> extends true
+/** Sync iterators (incl. sync generators) — proxied as async iterators on the remote side. */
+type IsSyncIterFn<T> =
+  T extends (...args: any[]) => Iterable<any>
+    ? T extends (...args: any[]) => AsyncIterable<any>
       ? false
-      : IsStreamingFn<T> extends true
-        ? false
-        : true
-  : false;
+      : true
+    : false;
+type IsAsyncFn<T> = T extends (...args: any[]) => Promise<any> ? true : false;
 
 // Method return type extraction
 
 type UnwrapPromise<T> = T extends Promise<infer R> ? R : T;
 type UnwrapAsyncIterable<T> =
   T extends AsyncIterable<infer R> ? R : T extends AsyncIterableIterator<infer R> ? R : never;
+type UnwrapIterable<T> = T extends Iterable<infer R> ? R : never;
 
 type AsyncReturnType<T extends AnyFn> = UnwrapPromise<ReturnType<T>>;
 type StreamChunkType<T extends AnyFn> = UnwrapAsyncIterable<ReturnType<T>>;
@@ -35,15 +31,13 @@ type StreamChunkType<T extends AnyFn> = UnwrapAsyncIterable<ReturnType<T>>;
 // Per-method remote transformation
 
 type RemoteMethod<T> = T extends AnyFn
-  ? IsStreamingFn<T> extends true
-    ? T // preserve; chunk ordering is important
-    : IsAsyncIterFn<T> extends true
-      ? T // preserve; consumer drives pull
+  ? IsAsyncIterFn<T> extends true
+    ? T // preserve; consumer drives pull on the existing async iterator
+    : IsSyncIterFn<T> extends true
+      ? (...args: Parameters<T>) => AsyncIterableIterator<UnwrapIterable<ReturnType<T>>> // sync gen -> async stream
       : IsAsyncFn<T> extends true
         ? T // already async, no transformation needed
-        : IsSyncFn<T> extends true
-          ? (...args: Parameters<T>) => Promise<ReturnType<T>> // wrap sync in promise
-          : never
+        : (...args: Parameters<T>) => Promise<ReturnType<T>> // wrap sync in promise
   : never; // non-callable members are excluded entirely
 
 // Filter for callable members

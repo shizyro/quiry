@@ -47,12 +47,11 @@ import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/sha
 
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
-import { isSerializable, clip, isAnyIterable } from "@/lib/helpers";
+import { isSerializable, isAnyIterable, clip } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
 import { InFlightTracker } from "@/lib/tracker";
 
 import { nanoid } from "nanoid";
-import sizeof from "object-sizeof";
 
 export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
 
@@ -178,7 +177,7 @@ export interface InteractiveRouter {
  * Bidirectional RPC session over a {@link Transport}: handshake, requests, streams, callbacks, and drain.
  * Incoming routing runs on a {@link Router}; unhandled async errors in packet handlers shut the session down.
  */
-export class Session<Ready extends boolean = boolean> {
+export class Session {
   private readonly emitter = new EventEmitter();
   #state: SessionState = "peering";
 
@@ -283,7 +282,7 @@ export class Session<Ready extends boolean = boolean> {
    * Opens transport, performs system handshake, starts the receive {@link Router}.
    * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
    */
-  open(): Session<true> {
+  open() {
     if (this.#state !== "peering")
       throw new QuiryError(
         WireStatus.FAILED_PRECONDITION,
@@ -304,7 +303,7 @@ export class Session<Ready extends boolean = boolean> {
     this.transition("open");
 
     this.logger?.info("Established session connection with peer");
-    return this as Session<true>;
+    return this;
   }
 
   /**
@@ -555,9 +554,7 @@ export class Session<Ready extends boolean = boolean> {
     {
       const count = substitutes.reduce<number>((prev, curr) => prev + Number(isCallbackStub(curr)), 0);
       if (count > 0) {
-        this.logger?.trace(
-          `Substituted ${count} callbacks for request ${clip(correlation)} (${sizeof(args) - sizeof(substitutes)} bytes)`,
-        );
+        this.logger?.trace(`Substituted ${count} callbacks for request ${clip(correlation)}`);
       }
     }
 
@@ -652,7 +649,7 @@ export class Session<Ready extends boolean = boolean> {
           });
         }),
       {
-        retries: control?.retry?.maxAttempts ?? this.config.defaultRetry.maxAttempts,
+        retries: (control?.retry?.maxAttempts ?? this.config.defaultRetry.maxAttempts) - 1,
         initialDelay: control?.retry?.delay ?? this.config.defaultRetry.delay,
         backoffStrategy: control?.retry?.backoffStrategy ?? this.config.defaultRetry.backoffStrategy,
         shouldRetry: (error: unknown) => (error instanceof QuiryError ? isRetryableStatus(error.code) : true),
@@ -839,7 +836,7 @@ export class Session<Ready extends boolean = boolean> {
   /** Registers a session-scoped callback stub; pair with {@link Session.release} or `CallbackHandle` dispose. */
   bind<T extends Function>(fn: T): Callback {
     const callback = this.callbacks.register(fn, CallbackScope.STACK);
-    this.logger?.debug(`Created callback proxy ${clip(callback)} (${sizeof(fn)} bytes)`);
+    this.logger?.debug(`Created callback proxy ${clip(callback)}`);
     return { [stub]: true, id: callback, scope: CallbackScope.STACK } satisfies Callback;
   }
 
@@ -1127,7 +1124,7 @@ export class Session<Ready extends boolean = boolean> {
         case "chunk": {
           if (packet.payload.seq !== entry.seq) {
             this.logger?.warn(
-              `Unexpected stream chunk sequence: expected ${entry.seq}, got ${packet.payload.seq} (${sizeof(packet.payload.chunk)} bytes)`,
+              `Unexpected stream chunk sequence: expected ${entry.seq}, got ${packet.payload.seq}`,
             );
             return;
           }
@@ -1557,10 +1554,14 @@ export class Session<Ready extends boolean = boolean> {
 
   /**
    * Rebuilds the argument list on the receiver side: replaces each {@link Callback} stub
-   * with a live async function that sends `CBK:INVOKE` and awaits `CBK:RETURN`.
+   * found anywhere in the graph with a live async function that sends `CBK:INVOKE`
+   * and awaits `CBK:RETURN`.
    *
    * `LOCAL`-scoped stub ids are tracked in `#remote_stubs[ref]` for bulk `CBK:RELEASE`
-   * once the owning request completes.
+   * once the owning request completes; `STACK`-scoped stubs survive the request.
+   *
+   * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
+   * Cycles are short-circuited via the `seen` map.
    */
   private restoreStubs(args: ReadonlyArray<unknown>, ref: CorrelationId): ReadonlyArray<unknown> {
     const track = (stub: Callback): CallbackId => {
@@ -1574,59 +1575,87 @@ export class Session<Ready extends boolean = boolean> {
       return stub.id;
     };
 
-    return args.map((value) => {
-      if (isCallbackStub(value)) return this.makeRemoteCallback(track(value), ref);
-      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const seen = new WeakMap<object, unknown>();
+
+    const walk = (value: unknown): unknown => {
+      if (isCallbackStub(value)) return this.makeRemoteCallback(track(value), ref, value.scope);
+      if (value === null || typeof value !== "object") return value;
+
+      const cached = seen.get(value as object);
+      if (cached !== undefined) return cached;
+
+      if (Array.isArray(value)) {
+        const result: unknown[] = new Array(value.length);
+        seen.set(value as object, result);
+        for (let i = 0; i < value.length; i++) result[i] = walk(value[i]);
+        return result;
+      }
+
+      const proto = Object.getPrototypeOf(value);
+      if (proto === Object.prototype || proto === null) {
         const result: Record<string, unknown> = {};
+        seen.set(value as object, result);
         for (const [key, val] of Object.entries(value as object)) {
-          result[key] = isCallbackStub(val) ? this.makeRemoteCallback(track(val), ref) : val;
+          result[key] = walk(val);
         }
         return result;
       }
+
       return value;
-    });
+    };
+
+    return args.map(walk);
   }
 
   /**
    * Creates an async proxy for a remote callback. Each call sends `CBK:INVOKE` and awaits
-   * the `CBK:RETURN` packet, bounded by `defaultTimeout`. Unobserved rejections are silently
-   * caught to prevent unhandled-rejection noise in fire-and-forget callback patterns.
+   * the `CBK:RETURN` packet. `LOCAL`-scoped invocations are bounded by `defaultTimeout`
+   * to prevent leaks from a misbehaving peer; `STACK`-scoped invocations are intentionally
+   * unbounded — long-lived event handlers are the very thing they exist for, and capping
+   * them at the unary timeout silently breaks that use case.
+   *
+   * Unobserved rejections are silently caught so fire-and-forget callbacks don't blow up
+   * the host with `unhandledRejection`.
    */
   private makeRemoteCallback(
     callback: CallbackId,
     ref: CorrelationId,
+    scope: CallbackScope,
   ): (...args: unknown[]) => Promise<unknown> {
     return (...args: unknown[]): Promise<unknown> => {
       const eid = `${callback}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
 
-      const timeout = this.config.defaultTimeout;
+      const timeout = scope === CallbackScope.STACK ? null : this.config.defaultTimeout;
       return new Promise<unknown>((resolve, reject) => {
-        // Bound the pending yield with a deadline — a misbehaving peer
-        // must not be able to leak promises indefinitely.
-        const timer = setTimeout(() => {
-          this.#pending_invocations.delete(eid);
-          this.outbound.exit();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        if (timeout !== null) {
+          // Bound the pending yield with a deadline — a misbehaving peer
+          // must not be able to leak promises indefinitely.
+          timer = setTimeout(() => {
+            this.#pending_invocations.delete(eid);
+            this.outbound.exit();
 
-          reject(
-            new QuiryError(
-              WireStatus.DEADLINE_EXCEEDED,
-              `Remote callback did not return within ${timeout}ms`,
-              {
-                correlationId: ref,
-                detail: { callback, eid, timeout },
-              },
-            ),
-          );
-        }, timeout);
+            reject(
+              new QuiryError(
+                WireStatus.DEADLINE_EXCEEDED,
+                `Remote callback did not return within ${timeout}ms`,
+                {
+                  correlationId: ref,
+                  detail: { callback, eid, timeout },
+                },
+              ),
+            );
+          }, timeout);
+        }
 
         this.#pending_invocations.set(eid, {
           ref,
           resolve: (value: unknown) => {
-            clearTimeout(timer);
+            if (timer) clearTimeout(timer);
             resolve(value);
           },
           reject: (error: Error) => {
-            clearTimeout(timer);
+            if (timer) clearTimeout(timer);
             reject(error);
           },
           timer,
@@ -1641,7 +1670,7 @@ export class Session<Ready extends boolean = boolean> {
           const pending = this.#pending_invocations.get(eid);
           if (!pending) return;
 
-          clearTimeout(pending.timer);
+          if (pending.timer) clearTimeout(pending.timer);
           this.#pending_invocations.delete(eid);
           this.outbound.exit();
 
@@ -1666,10 +1695,6 @@ export class Session<Ready extends boolean = boolean> {
 
   get state(): SessionState {
     return this.#state;
-  }
-
-  isConnected(): this is Session<true> {
-    return this.#state === ("open" as const);
   }
 
   get status(): SessionStatus {

@@ -26,6 +26,7 @@ namespace Quiry {
   export type CallbackHandle<T extends Function> = T & {
     release(): boolean;
     [Symbol.dispose](): void;
+    [Symbol.asyncDispose](): void;
   };
 
   export type PeerIdentifier = string | symbol | number | NodeId;
@@ -72,13 +73,27 @@ namespace Quiry {
      * This is useful for long-lived callbacks, like event handlers.
      */
     callback<T extends Function>(fn: T): CallbackHandle<T> {
+      if (typeof fn !== "function")
+        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
+      if (Normalized in fn)
+        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Function is already bound as a callback handle");
+
       const stub = this.session.bind(fn);
       const release = (): boolean => this.session.release(stub.id);
-      return Object.assign(fn, {
-        release,
-        [Symbol.dispose]: release,
-        [Normalized]: stub,
-      }) as CallbackHandle<T>;
+
+      // The wrapper still satisfies `typeof === "function"`, so passing it as
+      // a callback argument flows through `normalize()` -> `[Normalized]` -> the
+      // existing stub, just like a decorated function would.
+      const handle = (...args: unknown[]): unknown =>
+        (fn as unknown as (...a: unknown[]) => unknown)(...args);
+      Object.defineProperties(handle, {
+        release: { value: release, enumerable: false },
+        [Symbol.dispose]: { value: release, enumerable: false },
+        [Symbol.asyncDispose]: { value: release, enumerable: false },
+        [Normalized]: { value: stub, enumerable: false },
+      });
+
+      return handle as unknown as CallbackHandle<T>;
     }
 
     /** Resolves to the value of a remote property. */
@@ -137,12 +152,19 @@ namespace Quiry {
 }
 
 namespace Quiry {
-  // biome-ignore lint/style/useConst: intentional, can be overridden
-  export let logger: Logger | null = null;
+  let _logger: Logger | null = null;
 
   const peers = new Map<PeerIdentifier, PeerConnection>();
   const emitter = new EventEmitter<QuiryEvents>();
   const services = new Map<string, ServiceImpl>();
+
+  /**
+   * Install a logger sink. Pass `null` to disable logging.
+   * Logger is consulted by every active session and by the namespace itself.
+   */
+  export function setLogger(logger: Logger | null): void {
+    _logger = logger;
+  }
 
   // --------- PUBLIC API: PERSISTENCE --------- //
 
@@ -169,16 +191,15 @@ namespace Quiry {
   ): PeerConnection<PeerIdentifier, TServices>;
 
   export function attach(transport: Transport, options: AttachOptions = {}): PeerConnection {
-    const identifier = options.identifier ?? (randomBytes(4).toString("hex") as NodeId);
-    const session = new Session(transport, inquiry, {}, logger).open();
+    const identifier = options.identifier ?? randomBytes(4).toString("hex");
     if (peers.has(identifier)) {
-      void session.close();
       throw new QuiryError(
         WireStatus.FAILED_PRECONDITION,
         `Peer with identifier ${String(identifier)} already registered`,
       );
     }
 
+    const session = new Session(transport, inquiry, {}, _logger).open();
     const connection = new PeerConnection(identifier, session);
     peers.set(identifier, connection);
 
@@ -187,13 +208,13 @@ namespace Quiry {
       (reason?: string) => {
         if (peers.delete(identifier)) {
           emitter.emit("peer-disconnected", connection, reason);
-          logger?.info(`Peer ${String(identifier)} disconnected`);
+          _logger?.info(`Peer ${String(identifier)} disconnected`);
         }
       },
       { once: true },
     );
 
-    logger?.info(`Peer ${String(identifier)} attached`);
+    _logger?.info(`Peer ${String(identifier)} attached`);
     emitter.emit("peer-connected", connection);
     return connection;
   }
@@ -202,11 +223,11 @@ namespace Quiry {
     const connection = peers.get(identifier);
     if (!connection) return;
 
+    // `close()` triggers `session.terminate`, which fires the `terminate` listener
+    // registered in `attach()`. That listener removes the entry from `peers` and
+    // emits `peer-disconnected`, so we don't need to do either of those here.
     await connection.close("detached", !kill);
-    peers.delete(identifier);
-
-    emitter.emit("peer-disconnected", connection);
-    logger?.info(`Peer ${String(identifier)} detached`);
+    _logger?.info(`Peer ${String(identifier)} detached`);
   }
 
   export function get(identifier: PeerIdentifier): PeerConnection | undefined {
@@ -254,7 +275,7 @@ namespace Quiry {
       return Promise.resolve(prop);
     }
 
-    logger?.trace(
+    _logger?.trace(
       `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
     );
 
@@ -434,22 +455,31 @@ function makeCallOrStream<T = unknown>(
   } as CallOrStream<T>;
 }
 
+const REQUEST_CONTROL_KEYS = new Set(["timeout", "retry", "abortable", "traceId"]);
+
 /**
- * If the last element is a non-null object with `timeout`, `retries`, or `signal`, it is peeled off as
- * {@link RequestControl}; otherwise the whole `rest` array is positional arguments.
+ * Peels off a trailing {@link RequestControl} object from the variadic `rest` array.
+ *
+ * To minimize the chance of a regular argument being mistaken for control options,
+ * we only treat the last element as control if it's a plain object whose keys are
+ * a non-empty subset of {@link REQUEST_CONTROL_KEYS}. An empty object or any
+ * unknown key disqualifies it.
  */
 function splitArgsAndOptions(rest: unknown[]): [unknown[], RequestControl | undefined] {
-  if (
-    rest.length > 0 &&
-    rest[rest.length - 1] &&
-    typeof rest[rest.length - 1] === "object" &&
-    ("timeout" in (rest[rest.length - 1] as object) ||
-      "retries" in (rest[rest.length - 1] as object) ||
-      "signal" in (rest[rest.length - 1] as object))
-  ) {
-    return [rest.slice(0, -1), rest[rest.length - 1] as RequestControl];
+  if (rest.length === 0) return [rest, undefined];
+
+  const tail = rest[rest.length - 1];
+  if (!tail || typeof tail !== "object" || Array.isArray(tail)) return [rest, undefined];
+
+  const proto = Object.getPrototypeOf(tail);
+  if (proto !== Object.prototype && proto !== null) return [rest, undefined];
+
+  const keys = Object.keys(tail);
+  if (keys.length === 0 || !keys.every((k) => REQUEST_CONTROL_KEYS.has(k))) {
+    return [rest, undefined];
   }
-  return [rest, undefined];
+
+  return [rest.slice(0, -1), tail as RequestControl];
 }
 
 export * from "@/internal";
