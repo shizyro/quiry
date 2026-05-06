@@ -3,13 +3,14 @@ import type { AnyPacket } from "@/interface/packets";
 
 import {
   TransportError,
+  TransportState,
   type Transport,
   type TransportEvents,
   type BackpressureSignal,
-  type ConnectionState,
+  BackpressureState,
 } from ".";
 
-import { PacketQueue } from "./packet-queue";
+import { PacketQueue } from "./lib/packet-queue";
 import { isWirePacket } from "@/lib/helpers";
 
 const BACKPRESSURE_HIGH = 100; // packets
@@ -25,14 +26,14 @@ export abstract class BaseTransport implements Transport {
   private readonly emitter = new EventEmitter<TransportEvents>();
   protected readonly queue = new PacketQueue(16);
 
-  #state: ConnectionState = "connecting";
+  #state: TransportState = TransportState.CLOSED;
   #depth: number = 0;
 
-  get state(): ConnectionState {
+  get state(): TransportState {
     return this.#state;
   }
 
-  protected transition(next: ConnectionState): void {
+  protected transition(next: TransportState): void {
     if (next === this.#state) return;
     const prev = this.#state;
     this.#state = next;
@@ -59,14 +60,14 @@ export abstract class BaseTransport implements Transport {
   /**
    * Subclasses call this to post a message on their specific port type.
    */
-  protected abstract post(packet: AnyPacket, transferables: Transferable[]): void | Promise<void>;
+  protected abstract post(packet: AnyPacket, transferables: Transferable[]): void | PromiseLike<void>;
 
   receive(): AsyncIterableIterator<AnyPacket> {
     return this.queue[Symbol.asyncIterator]();
   }
 
-  abstract open(): Promise<void>;
-  abstract close(): Promise<void>;
+  abstract attach(): void;
+  abstract dispose(): void;
 
   /**
    * Enqueues a decoded message from the underlying channel.
@@ -85,7 +86,7 @@ export abstract class BaseTransport implements Transport {
       reason instanceof TransportError ? reason : new TransportError(reason, { kind: "terminate", cause });
     this.emitter.emit("error", error);
     this.queue.close();
-    this.transition("closed");
+    this.transition(TransportState.CLOSED);
     this.cleanup();
   }
 
@@ -100,7 +101,11 @@ export abstract class BaseTransport implements Transport {
   get backpressure(): BackpressureSignal {
     return {
       state:
-        this.#depth >= BACKPRESSURE_CRITICAL ? "critical" : this.#depth >= BACKPRESSURE_HIGH ? "high" : "ok",
+        this.#depth >= BACKPRESSURE_CRITICAL
+          ? BackpressureState.CRITICAL
+          : this.#depth >= BACKPRESSURE_HIGH
+            ? BackpressureState.HIGH
+            : BackpressureState.OK,
       depth: this.#depth,
     };
   }

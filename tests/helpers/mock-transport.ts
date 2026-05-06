@@ -1,12 +1,18 @@
 import EventEmitter from "node:events";
 
 import type { AnyPacket } from "@/interface/packets";
-import type { Transport, TransportError, BackpressureSignal, ConnectionState } from "@/core/transport";
+import {
+  type Transport,
+  type TransportError,
+  type BackpressureSignal,
+  TransportState,
+  BackpressureState,
+} from "@/core/transport";
 
-import { PacketQueue } from "@/core/transport/packet-queue";
+import { PacketQueue } from "@/core/transport/lib/packet-queue";
 
 interface MockEvents {
-  "state-change": [next: ConnectionState, prev: ConnectionState];
+  "state-change": [next: TransportState, prev: TransportState];
   backpressure: [signal: BackpressureSignal];
   error: [error: TransportError];
 }
@@ -31,36 +37,36 @@ export class MockTransport implements Transport {
   readonly #inbound = new PacketQueue();
 
   #peer: MockTransport | null = null;
-  #state: ConnectionState = "connecting";
+  #state: TransportState = TransportState.CLOSED;
 
-  get state(): ConnectionState {
+  get state(): TransportState {
     return this.#state;
   }
 
   get backpressure(): BackpressureSignal {
-    return { state: "ok", depth: 0 };
+    return { state: BackpressureState.OK, depth: 0 };
   }
 
-  private transition(next: ConnectionState): void {
+  private transition(next: TransportState): void {
     if (next === this.#state) return;
     const prev = this.#state;
     this.#state = next;
     this.#emitter.emit("state-change", next, prev);
   }
 
-  async open(): Promise<void> {
-    this.transition("open");
+  attach(): void {
+    this.transition(TransportState.OPEN);
   }
 
-  async close(): Promise<void> {
-    if (this.#state === "closed") return;
-    this.transition("closed");
+  dispose(): void {
+    if (this.#state === TransportState.CLOSED) return;
+    this.transition(TransportState.CLOSED);
     this.#inbound.close();
     this.#peer = null;
   }
 
   async send(packet: AnyPacket): Promise<void> {
-    if (this.#state !== "open") {
+    if (this.#state !== TransportState.OPEN) {
       throw new Error(`MockTransport cannot send: state=${this.#state}`);
     }
     if (!this.#peer) throw new Error("MockTransport has no peer");
@@ -70,7 +76,7 @@ export class MockTransport implements Transport {
     // reentrancy if a receiver calls back into send() synchronously.
     const cloned = structuredClone(packet);
     queueMicrotask(() => {
-      if (this.#peer && this.#peer.#state === "open") this.#peer.#deliver(cloned);
+      if (this.#peer && this.#peer.#state === TransportState.OPEN) this.#peer.#deliver(cloned);
     });
   }
 
@@ -78,7 +84,7 @@ export class MockTransport implements Transport {
     // Defensive: a race with close() could still race the state check on
     // the sending side. PacketQueue already drops silently on `#closed`,
     // so this is belt-and-suspenders.
-    if (this.#state !== "open") return;
+    if (this.#state !== TransportState.OPEN) return;
     this.#inbound.enqueue(packet);
   }
 

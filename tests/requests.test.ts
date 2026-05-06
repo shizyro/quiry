@@ -41,22 +41,6 @@ describe("Session requests", () => {
       expect(arg.service).toBe("orders");
       expect(arg.property).toBe("create");
       expect(arg.args).toEqual(["sku-1", 3, { gift: true }]);
-      expect(typeof arg.id).toBe("string");
-    });
-
-    it("propagates control.traceId on the wire", async () => {
-      let captured: string | undefined;
-      pair = await openSessionPair({
-        producerInquiry: async (req) => {
-          captured = req.traceId;
-          return null;
-        },
-      });
-
-      const traceId = "trace-abc" as unknown as TraceId;
-      await pair.consumer.request("_", "_", [], { traceId });
-
-      expect(captured).toBe("trace-abc");
     });
 
     it("returns a variety of serializable value shapes unchanged", async () => {
@@ -483,27 +467,6 @@ describe("Session requests", () => {
         code: WireStatus.DATA_LOSS,
         message: "root cause",
       });
-    });
-
-    it("tags the rebuilt error with the remote node as `origin`", async () => {
-      let producerNodeId: string | null = null;
-      pair = await openSessionPair({
-        producerInquiry: async () => {
-          throw new QuiryError(WireStatus.INTERNAL, "kaboom");
-        },
-      });
-
-      // The producer's `peer` field on the consumer side is whatever the
-      // producer announced during handshake. It also matches the origin of
-      // any errors produced on the producer side.
-      producerNodeId = pair.consumer.peer;
-
-      const err = await pair.consumer
-        .request("_", "_", [], { retry: { maxAttempts: 0 } })
-        .catch((e: unknown) => e);
-
-      expect(err).toBeInstanceOf(QuiryError);
-      expect((err as QuiryError).origin).toBe(producerNodeId);
     });
   });
 });

@@ -18,3 +18,5 @@ type Primitive = string | number | boolean | null | undefined;
 type DeepRequired<T> = Required<{
   [K in keyof T]: T[K] extends Required<T[K]> ? T[K] : DeepRequired<T[K]>;
 }>;
+
+type Unsubscribe = () => void;

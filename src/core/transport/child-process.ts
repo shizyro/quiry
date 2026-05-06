@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 
 import { BaseTransport } from "./base";
-import { TransportError, type TransportOptions } from ".";
+import { TransportError, TransportState, type TransportOptions } from ".";
 
 export interface ChildProcessTransportOptions extends TransportOptions {
   readonly child?: ChildProcess;
@@ -20,15 +20,16 @@ export class ChildProcessTransport extends BaseTransport {
     const isChildProcess = typeof process.send === "function";
     if (!isChildProcess) {
       if (!opts.child) throw new TypeError("Child process instance is required");
+      if (!(opts.child instanceof ChildProcess)) throw new TypeError("Child process instance is required");
       this.port = opts.child;
     } else {
       this.port = process;
     }
   }
 
-  async open(): Promise<void> {
-    if (this.state !== "connecting") {
-      throw new TransportError("Cannot open transport that is not in the connecting state");
+  attach(): void {
+    if (this.state !== TransportState.CLOSED) {
+      throw new TransportError("Cannot attach transport that is not in the closed state");
     }
 
     this.port.on("message", this.onPortMessage);
@@ -37,20 +38,16 @@ export class ChildProcessTransport extends BaseTransport {
     if (this.port instanceof ChildProcess) {
       this.port.on("exit", this.onPortExit);
       this.port.on("disconnect", this.onPortDisconnect);
-
-      // No strict "online" equivalent; nextTick is the closest safe point.
-      await new Promise((resolve) => process.nextTick(resolve));
     } else {
       // Child side — detect parent disconnect.
       process.on("disconnect", this.onPortDisconnect);
     }
 
-    this.transition("open");
+    this.transition(TransportState.OPEN);
   }
 
-  async close(): Promise<void> {
-    if (this.state === "closed" || this.state === "draining") return;
-    this.transition("draining");
+  dispose(): void {
+    if (this.state === TransportState.CLOSED) return;
 
     this.port.off("message", this.onPortMessage);
     this.port.off("error", this.onPortError);
@@ -58,17 +55,11 @@ export class ChildProcessTransport extends BaseTransport {
     if (this.port instanceof ChildProcess) {
       this.port.off("exit", this.onPortExit);
       this.port.off("disconnect", this.onPortDisconnect);
+    } else process.off("disconnect", this.onPortDisconnect);
 
-      this.port.disconnect();
-      this.port.kill();
-    } else {
-      process.off("disconnect", this.onPortDisconnect);
-      process.exit(0);
-    }
-
-    // Not sure if this part is reached...
+    // Not sure if this part is reached.
     this.queue.close();
-    this.transition("closed");
+    this.transition(TransportState.CLOSED);
     this.cleanup();
   }
 
@@ -87,13 +78,13 @@ export class ChildProcessTransport extends BaseTransport {
   };
 
   private readonly onPortExit = (code: number | null): void => {
-    if (this.state === "draining" || this.state === "closed") return;
-    if (code === 0) return void this.close();
+    if (this.state === TransportState.CLOSED) return;
+    if (code === 0) return void this.dispose();
     this.terminate(`Child process exited with code ${code}`);
   };
 
   private readonly onPortDisconnect = (): void => {
-    if (this.state === "draining" || this.state === "closed") return;
+    if (this.state === TransportState.CLOSED) return;
     this.terminate("IPC channel disconnected");
   };
 }

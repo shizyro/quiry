@@ -1,5 +1,4 @@
 type Predicate<T> = (value: T) => boolean;
-type Unsubscribe = () => void;
 
 interface WaitOptions {
   signal?: AbortSignal;

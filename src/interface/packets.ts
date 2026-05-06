@@ -1,15 +1,15 @@
 import type {
-  WireKind,
-  WirePacket,
-  WireStatus,
   NodeId,
   CorrelationId,
-  RequestControl,
-  WireError,
   InvocationId,
   CallbackId,
+  WireKind,
+  WirePacket,
+  WireError,
+  WireStatus,
   MetricsData,
   HeartbeatStatus,
+  RequestControl,
 } from "./base";
 
 /** Typed wire packet with message type discrimination. */
@@ -181,14 +181,12 @@ export type HandshakePayload = {
 };
 
 export type IdentifyPayload = {
-  readonly label?: string;
-  /** The interval at which the peer is expected to send heartbeats. */
-  readonly heartbeatInterval?: number;
+  // Might need to add more fields here...
 };
 
 export type IdentifyAckPayload = WithRef<{
-  readonly label?: string;
-  // Might need to add more fields here...
+  readonly services: ReadonlyArray<string>;
+  // ...
 }>;
 
 export type HeartbeatPayload = {
@@ -205,16 +203,21 @@ export type DrainAckPayload = WithRef<{
   readonly uptime?: number;
 }>;
 
+/** @deprecated */
 export interface SystemHandshakePacket
   extends Omit<
     TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.HANDSHAKE, HandshakePayload>,
     "from"
   > {}
 
-/** A packet sent by a worker node to identify itself to the host. */
+/**
+ * A packet sent to identify itself to the peer.
+ * @deprecated
+ */
 export interface SystemIdentifyPacket
   extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.IDENTIFY, IdentifyPayload> {}
 
+/** @deprecated */
 export interface SystemIdentifyAckPacket
   extends TypedWirePacket<
     typeof WireKind.SYSTEM,
@@ -222,6 +225,7 @@ export interface SystemIdentifyAckPacket
     IdentifyAckPayload
   > {}
 
+/** @deprecated */
 export interface SystemHeartbeatPacket
   extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.HEARTBEAT, HeartbeatPayload> {}
 

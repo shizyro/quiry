@@ -6,9 +6,7 @@
 
 import { inspect } from "node:util";
 
-import { WireStatus, type WireError, type CorrelationId, type NodeId, type TraceId } from "@/interface/base";
-
-import { localNodeId } from "@/shared";
+import { WireStatus, type WireError, type CorrelationId, type TraceId } from "@/interface/base";
 import { isSerializable } from "@/lib/helpers";
 
 export type NonOkWireStatus = Exclude<WireStatus, typeof WireStatus.OK>;
@@ -34,8 +32,6 @@ export interface TraceableErrorOptions {
   readonly detail?: Record<string, unknown>;
   /** Native cause chain; preserved locally, serialized at the wire boundary. */
   readonly cause?: unknown;
-  /** Who raised this error. Defaults to `localNodeId`.. */
-  readonly origin?: NodeId;
   /** The request this error belongs to, if applicable. */
   readonly correlationId?: CorrelationId;
   /** End-to-end trace identifier propagated via `RequestControl.trace`. */
@@ -55,7 +51,6 @@ export class QuiryError extends Error {
   readonly code: WireStatus;
   readonly retryable: boolean;
 
-  readonly origin: NodeId;
   readonly correlationId?: CorrelationId;
   readonly traceId?: TraceId;
 
@@ -68,7 +63,6 @@ export class QuiryError extends Error {
     this.name = "QuiryError";
     this.code = code;
     this.retryable = isRetryableStatus(code);
-    this.origin = opts.origin ?? localNodeId;
     this.correlationId = opts.correlationId;
     this.traceId = opts.traceId;
     this.detail = opts.detail;
@@ -94,7 +88,7 @@ export class QuiryError extends Error {
    */
   static from(
     error: unknown,
-    ctx: Pick<TraceableErrorOptions, "correlationId" | "traceId" | "origin"> = {},
+    ctx: Pick<TraceableErrorOptions, "correlationId" | "traceId"> = {},
   ): QuiryError {
     if (error instanceof QuiryError) {
       // Only augment context; do not rewrap.
@@ -102,7 +96,6 @@ export class QuiryError extends Error {
         return new QuiryError(error.code, error.message, {
           detail: error.detail,
           cause: error.cause,
-          origin: error.origin,
           correlationId: ctx.correlationId,
           traceId: error.traceId ?? ctx.traceId,
           stack: error.stack,
@@ -132,7 +125,6 @@ export class QuiryError extends Error {
    */
   [inspect.custom](_depth: number, _opts: unknown, _inspectFn: typeof inspect): string {
     const meta: string[] = [`code=${WireStatus[this.code] ?? this.code}`];
-    meta.push(`origin=${this.origin}`);
     if (this.correlationId) meta.push(`ref=${this.correlationId}`);
     if (this.traceId) meta.push(`trace=${this.traceId}`);
     if (this.retryable) meta.push("retryable");
@@ -152,7 +144,7 @@ export class QuiryError extends Error {
 function describe(cause: unknown): string {
   if (cause instanceof QuiryError) {
     const bits: string[] = [`${cause.name}: ${cause.message}`];
-    bits.push(`(code=${WireStatus[cause.code] ?? cause.code}, origin=${cause.origin})`);
+    bits.push(`(code=${WireStatus[cause.code] ?? cause.code})`);
     if (cause.cause !== undefined) bits.push(`\n\t\tcaused by: ${describe(cause.cause)}`);
     return bits.join(" ");
   }
@@ -180,7 +172,6 @@ export function toWireError(
     const details = {
       status: (err.code === WireStatus.OK ? WireStatus.INTERNAL : err.code) as NonOkWireStatus,
       message: err.message,
-      origin: err.origin,
       correlationId: err.correlationId,
       traceId: err.traceId,
       detail: err.detail ? sanitize(err.detail) : undefined,
@@ -225,11 +216,10 @@ function sanitize(detail: Record<string, unknown>): Record<string, unknown> {
 export function fromWireError(error: WireError): QuiryError {
   const cause = error.cause ? fromWireError(error.cause) : undefined;
   const stack = error.stack
-    ? `${QuiryError.constructor.name}: ${error.message}\n\t[remote origin ${error.origin}]\n${stripStackHeader(error.stack)}`
+    ? `${QuiryError.constructor.name}: ${error.message}\n\t[remote origin]\n${stripStackHeader(error.stack)}`
     : undefined;
 
   return new QuiryError(error.status, error.message, {
-    origin: error.origin,
     correlationId: error.correlationId,
     traceId: error.traceId,
     detail: error.detail,

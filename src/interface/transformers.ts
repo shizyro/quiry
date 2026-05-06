@@ -48,7 +48,7 @@ type RemoteMethod<T> = T extends AnyFn
 
 // Filter for callable members
 
-type RemotableKey<T, K extends keyof T> = K extends string // string keys only, no symbols
+type RemotableMethodKey<T, K extends keyof T> = K extends string // string keys only, no symbols
   ? T[K] extends AnyFn
     ? T[K] extends AnyConstructor // exclude; can't be invoked remotely
       ? never
@@ -56,18 +56,22 @@ type RemotableKey<T, K extends keyof T> = K extends string // string keys only, 
     : never
   : never;
 
-export type RemotableKeys<T> = { [K in keyof T]: RemotableKey<T, K> }[keyof T];
-export type ReadableProps<T> = Readonly<{
-  [K in keyof T as T[K] extends Serializable ? K : never]: Promise<T[K]>;
-}>;
+export type RemotableMethodKeys<T> = { [K in keyof T]: RemotableMethodKey<T, K> }[keyof T];
+export type RemotablePropertyKeys<T> = {
+  [K in keyof T]: T[K] extends Serializable ? K : never;
+}[keyof T];
 
 // Full service proxy type
 
-export type RemoteServiceDefinition<T> = { [K in RemotableKeys<T>]: RemoteMethod<T[K]> } & ReadableProps<T>;
+export type RemoteServiceDefinition<T> = {
+  [K in RemotableMethodKeys<T>]: RemoteMethod<T[K]>;
+} & {
+  [K in RemotablePropertyKeys<T>]: Promise<T[K]>;
+};
 
 export type ServiceImpl = object;
 /** A registry of named services. */
-export type ServiceRegistry = Record<PropertyKey, ServiceImpl> & { [key: string]: ServiceImpl };
+export type ServiceRegistry = Record<string, ServiceImpl>;
 /** Wraps service registry in a readonly interface with remote service proxies. */
 export type MappedServiceRegistry<S extends ServiceRegistry> = {
   readonly [K in keyof S]: RemoteServiceDefinition<S[K]>;
@@ -83,15 +87,15 @@ export type ServiceType<S extends ServiceRegistry, K extends keyof S> = S[K];
 // Utility types
 
 /** Infer the resolved value of a remote method call. */
-export type InferRemoteReturn<T, M extends RemotableKeys<T>> =
+export type InferRemoteReturn<T, M extends RemotableMethodKeys<T>> =
   RemoteMethod<T[M]> extends (...args: any[]) => infer R ? R : never;
 
 /** Infer the chunk type of a remove streaming method. */
-export type InferRemoteStreamChunk<T, M extends RemotableKeys<T>> =
+export type InferRemoteStreamChunk<T, M extends RemotableMethodKeys<T>> =
   RemoteMethod<T[M]> extends (...args: any[]) => AsyncIterable<infer R> ? R : never;
 
 /** Infer the parameter tuple of a remote method. */
-export type InferRemoteParams<T, M extends RemotableKeys<T>> =
+export type InferRemoteParams<T, M extends RemotableMethodKeys<T>> =
   RemoteMethod<T[M]> extends (...args: infer P) => any ? P : never;
 
 type EventDefinition<TPayload extends readonly unknown[] = readonly unknown[]> = TPayload;

@@ -13,9 +13,11 @@ export { ChildProcessTransport } from "@/core/transport/child-process";
 export * from "@/interface/packets";
 export {
   WireKind,
+  WireStatus,
   type WirePacket,
   type WireError,
+  type MetricsData,
   type RequestControl,
   type RetryPolicy,
 } from "@/interface/base";
-export type { CallbackId, InvocationId, CorrelationId, NodeId, TraceId } from "@/interface/base";
+export type { CallbackId, InvocationId, CorrelationId, TraceId } from "@/interface/base";

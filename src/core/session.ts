@@ -1,16 +1,19 @@
 import EventEmitter from "node:events";
 
-import type { BackpressureSignal, Transport, TransportError } from "@/core/transport";
+import {
+  TransportState,
+  type BackpressureSignal,
+  type Transport,
+  type TransportError,
+} from "@/core/transport";
 import {
   WireKind,
   WireStatus,
-  type NodeId,
   type CallbackId,
   type CorrelationId,
   type InvocationId,
   type RequestControl,
   type RetryPolicy,
-  type TraceId,
 } from "@/interface/base";
 
 import {
@@ -31,12 +34,10 @@ import {
   type CallRequestPacket,
   type CancelRequestPacket,
   type GetRequestPacket,
-  type HandshakePayload,
   type PacketByKind,
   type StreamResponsePacket,
   type SystemDrainAckPacket,
   type SystemDrainPacket,
-  type SystemHandshakePacket,
   type ValueResponsePacket,
 } from "@/interface/packets";
 
@@ -46,14 +47,12 @@ import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/sha
 
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
-import { nanoid } from "nanoid";
 import { isSerializable, clip, isAnyIterable } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
 import { InFlightTracker } from "@/lib/tracker";
-import sizeof from "object-sizeof";
 
-import { threadId } from "node:worker_threads";
-import { localNodeId } from "@/shared";
+import { nanoid } from "nanoid";
+import sizeof from "object-sizeof";
 
 export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
 
@@ -63,12 +62,12 @@ export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
  *
  * Might want to think of a better name for this.
  */
-export const normalized: unique symbol = Symbol("quiry.normalized");
+export const Normalized: unique symbol = Symbol("quiry.normalized");
 
-/** Unwraps `[normalized]` aliases; preserves cycles for a later `isSerializable` rejection instead of blowing the stack. */
+/** Unwraps `[Normalized]` aliases; preserves cycles for a later `isSerializable` rejection instead of blowing the stack. */
 function normalize<T = unknown>(value: T, seen?: WeakSet<object>): T {
   if (Object(value) !== value || value === null) return value;
-  if (normalized in (value as object)) return (value as unknown as { [normalized]: T })[normalized];
+  if (Normalized in (value as object)) return (value as unknown as { [Normalized]: T })[Normalized];
   if (typeof value === "object") {
     // Cycle protection: if we've already seen this node on the current
     // walk, return it unchanged. The cycle will still be present in the
@@ -91,11 +90,9 @@ function normalize<T = unknown>(value: T, seen?: WeakSet<object>): T {
 
 export type InquiryFunc = (request: InquiryRequest) => Promise<unknown> | AsyncIterableIterator<unknown>;
 export type InquiryRequest = Readonly<{
-  id: CorrelationId;
   service: string;
   property: string;
   args: ReadonlyArray<unknown>;
-  traceId?: TraceId;
 }>;
 
 interface PendingCallRequest<T = unknown> {
@@ -154,9 +151,27 @@ export interface SessionConfig {
 
 export interface SessionEvents {
   "state-change": [next: SessionState, prev: SessionState];
-  handshake: [peer: NodeId, metadata: HandshakePayload];
   terminate: [reason?: string];
   error: [error: Error];
+}
+
+export interface InteractiveRouter {
+  /** Passive, persistent listener for a specific packet kind. Matching packets are still forwarded to other consumers. Returns unsubscribe. */
+  listen<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: PacketByKind<K>) => packet is R,
+    handler: (packet: R) => void,
+  ): Unsubscribe;
+
+  /**
+   * Active interceptor for a specific packet kind. When `handler` returns `true` the packet
+   * is consumed and not forwarded to the default handler. Returns unsubscribe.
+   */
+  intercept<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: PacketByKind<K>) => packet is R,
+    handler: (packet: R) => boolean,
+  ): Unsubscribe;
 }
 
 /**
@@ -165,13 +180,25 @@ export interface SessionEvents {
  */
 export class Session<Ready extends boolean = boolean> {
   private readonly emitter = new EventEmitter();
-
-  #peer: NodeId | null = null;
   #state: SessionState = "peering";
-  #connectedAt: number = -1;
 
   private readonly config: DeepRequired<SessionConfig>;
-  private readonly router: Router<AnyPacket>;
+  private readonly conveyor: Router<AnyPacket>;
+
+  get router(): InteractiveRouter {
+    return {
+      listen: (kind, predicate, handler) =>
+        this.conveyor.listen(
+          (packet) => packet.kind === kind && (predicate ? predicate(packet) : true),
+          handler,
+        ),
+      intercept: (kind, predicate, handler) =>
+        this.conveyor.intercept(
+          (packet) => packet.kind === kind && (predicate ? predicate(packet) : true),
+          handler,
+        ),
+    };
+  }
 
   private readonly inbound = new InFlightTracker();
   private readonly outbound = new InFlightTracker();
@@ -196,7 +223,7 @@ export class Session<Ready extends boolean = boolean> {
     config: SessionConfig = {},
     private readonly logger: Logger | null = null,
   ) {
-    this.router = new Router(this.transport.receive());
+    this.conveyor = new Router(this.transport.receive());
     this.config = {
       handshakeTimeout: config.handshakeTimeout ?? 10_000,
       defaultTimeout: config.defaultTimeout ?? 10_000,
@@ -214,7 +241,6 @@ export class Session<Ready extends boolean = boolean> {
   send(packet: Omit<AnyTypedPacket, "id" | "from" | "timestamp">): Promise<CorrelationId> {
     return this.forward({
       id: nanoid() as CorrelationId,
-      from: localNodeId,
       timestamp: Date.now(),
       ...packet,
     } as AnyPacket);
@@ -257,7 +283,7 @@ export class Session<Ready extends boolean = boolean> {
    * Opens transport, performs system handshake, starts the receive {@link Router}.
    * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
    */
-  async open(): Promise<this> {
+  open(): Session<true> {
     if (this.#state !== "peering")
       throw new QuiryError(
         WireStatus.FAILED_PRECONDITION,
@@ -268,26 +294,17 @@ export class Session<Ready extends boolean = boolean> {
     this.transport.on("error", this.onTransportError);
     // (error handlers are automatically disposed when the transport is closed)
 
-    await this.transport.open();
-    await this.performHandshake().catch(async (error: unknown) => {
-      // Close the underlying transport so we don't leak the port/worker,
-      // then re-throw for the caller to handle.
-
-      //  The supervisor is NOT involved — the session never transitioned out of `peering`.
-      await this.transport.close().catch(() => null);
-      throw error;
-    });
-
+    this.transport.attach();
     // Router runs for the lifetime of the session and is stopped inside teardown.
-    void this.router.start(this.routeIncomingPacket.bind(this)).catch((error: unknown) => {
+    void this.conveyor.start(this.routeIncomingPacket.bind(this)).catch((error: unknown) => {
       // The router's source stream errored. Treat as fatal — we can't receive any more packets.
       this.logger?.error("Router source stream errored", { error: QuiryError.from(error) });
-      void this.terminate();
+      this.terminate();
     });
     this.transition("open");
 
-    this.logger?.info(`Established session with peer ${this.#peer}`);
-    return this;
+    this.logger?.info("Established session connection with peer");
+    return this as Session<true>;
   }
 
   /**
@@ -297,54 +314,11 @@ export class Session<Ready extends boolean = boolean> {
    */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#state === "closed") return;
-    if (!graceful || this.#state === "peering") return await this.terminate();
+    if (!graceful || this.#state === "peering") return this.terminate();
     return (this.#drain_promise ??= this.performDrain("local", reason));
   }
 
   // --------- INTERNALS: LIFECYCLE --------- //
-
-  private async performHandshake(): Promise<void> {
-    const id = await this.forward({
-      id: nanoid() as CorrelationId,
-      kind: WireKind.SYSTEM,
-      type: SystemMessageType.HANDSHAKE,
-      timestamp: Date.now(),
-      payload: { nodeId: localNodeId, threadId: threadId, pid: process.pid },
-    } satisfies SystemHandshakePacket);
-
-    this.logger?.trace(`Awaiting handshake response to (${clip(id)})`);
-    // Manually wait for the handshake response instead of using the router since
-    // the session shouldn't be able to read any packets before the handshake is complete.
-    const feedback = await new Promise<SystemHandshakePacket>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for handshake packet")),
-        this.config.handshakeTimeout,
-      );
-
-      void (async () => {
-        try {
-          for await (const packet of this.transport.receive()) {
-            if (packet.kind === WireKind.SYSTEM && packet.type === SystemMessageType.HANDSHAKE) {
-              clearTimeout(timer);
-              resolve(packet);
-              return;
-            }
-          }
-
-          reject(new QuiryError(WireStatus.DATA_LOSS, "No handshake packet received"));
-        } catch (error: unknown) {
-          clearTimeout(timer);
-          reject(QuiryError.from(error));
-        }
-      })();
-    });
-
-    this.#peer = feedback.payload.nodeId;
-    this.#connectedAt = Date.now();
-    this.logger?.debug(`Handshake completed with peer ${this.#peer}`);
-
-    this.emitter.emit("handshake", this.#peer, feedback.payload);
-  }
 
   /**
    * Null until drain begins; stays resolved afterward
@@ -446,7 +420,7 @@ export class Session<Ready extends boolean = boolean> {
       // remote-initiated drains are one-way from the peer's POV.
       const peerAck =
         initiator === "local"
-          ? this.router
+          ? this.conveyor
               .wait<SystemDrainAckPacket>(
                 (p) => p.kind === WireKind.SYSTEM && p.type === SystemMessageType.DRAIN_ACK,
                 { signal: controller.signal },
@@ -473,18 +447,18 @@ export class Session<Ready extends boolean = boolean> {
       initiator === "local" && this.logger?.debug("Drain interrupted or timed out; proceeding to teardown");
     } finally {
       clearTimeout(timer);
-      await this.terminate(reason);
+      this.terminate(reason);
     }
   }
 
-  private async terminate(reason?: string): Promise<void> {
+  private terminate(reason?: string): void {
     if (this.#state === "closed") return;
     const prev = this.#state;
     this.#state = "closed";
 
     // Stop the router; any waiters still pending get rejected with
     // "Stream closed" via the router's own cleanup.
-    this.router.stop();
+    this.conveyor.stop();
 
     // Reject all pending calls
     this.rejectAllPending(new QuiryError(WireStatus.ABORTED, "Session draining"));
@@ -500,7 +474,9 @@ export class Session<Ready extends boolean = boolean> {
     this.emitter.emit("state-change", "closed", prev);
     this.emitter.emit("terminate", reason);
 
-    void this.transport.close().catch(() => null);
+    try {
+      this.transport.dispose();
+    } catch {}
   }
 
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
@@ -515,7 +491,6 @@ export class Session<Ready extends boolean = boolean> {
       id: correlation,
       kind: WireKind.REQUEST,
       type: RequestMessageType.GET,
-      from: localNodeId,
       timestamp: Date.now(),
       payload: { service, property },
     } satisfies GetRequestPacket;
@@ -590,7 +565,6 @@ export class Session<Ready extends boolean = boolean> {
       id: correlation,
       kind: WireKind.REQUEST,
       type: RequestMessageType.CALL,
-      from: localNodeId,
       timestamp: Date.now(),
       payload: {
         service,
@@ -755,7 +729,6 @@ export class Session<Ready extends boolean = boolean> {
           id: correlation,
           kind: WireKind.REQUEST,
           type: RequestMessageType.CALL,
-          from: localNodeId,
           timestamp: Date.now(),
           payload: { service, method, args: substitutes, control },
         } satisfies CallRequestPacket);
@@ -848,7 +821,7 @@ export class Session<Ready extends boolean = boolean> {
     { timeout, signal }: { timeout?: number; signal?: AbortSignal } = {},
   ): Promise<R> {
     // @ts-expect-error: no plans to type this properly
-    return this.router
+    return this.conveyor
       .wait((packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true), {
         timeout,
         signal,
@@ -861,33 +834,6 @@ export class Session<Ready extends boolean = boolean> {
         }
         throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause: error });
       });
-  }
-
-  /** Passive, persistent listener for a specific packet kind. Matching packets are still forwarded to other consumers. Returns unsubscribe. */
-  listen<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate: (packet: PacketByKind<K>) => packet is R,
-    handler: (packet: R) => void,
-  ): () => void {
-    return this.router.listen(
-      (packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true),
-      handler,
-    );
-  }
-
-  /**
-   * Active interceptor for a specific packet kind. When `handler` returns `true` the packet
-   * is consumed and not forwarded to the default handler. Returns unsubscribe.
-   */
-  intercept<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate: (packet: PacketByKind<K>) => packet is R,
-    handler: (packet: R) => boolean,
-  ): () => void {
-    return this.router.intercept(
-      (packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true),
-      handler,
-    );
   }
 
   /** Registers a session-scoped callback stub; pair with {@link Session.release} or `CallbackHandle` dispose. */
@@ -922,7 +868,7 @@ export class Session<Ready extends boolean = boolean> {
     const attend = (p: PromiseLike<unknown> | unknown): void => {
       Promise.resolve(p).catch((error: unknown) => {
         this.logger?.error("Unhandled error in packet handler", { error: QuiryError.from(error) });
-        void this.terminate();
+        this.terminate();
       });
     };
 
@@ -1059,11 +1005,9 @@ export class Session<Ready extends boolean = boolean> {
       // TODO: maybe something like a semaphore to limit the number of concurrent requests
 
       const request = {
-        id: packet.id,
         service: packet.payload.service,
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
         args: "args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : [],
-        traceId: "control" in packet.payload ? packet.payload.control?.traceId : undefined,
       } satisfies InquiryRequest;
 
       let controller: AbortController | undefined;
@@ -1724,16 +1668,8 @@ export class Session<Ready extends boolean = boolean> {
     return this.#state;
   }
 
-  get peer(): NodeId | null {
-    return this.#peer;
-  }
-
   isConnected(): this is Session<true> {
-    return this.#state === ("open" as SessionState);
-  }
-
-  get connectedAt(): number {
-    return this.#connectedAt;
+    return this.#state === ("open" as const);
   }
 
   get status(): SessionStatus {
@@ -1757,11 +1693,7 @@ export class Session<Ready extends boolean = boolean> {
     if (this.#state === "closed" || this.#state === "draining") return;
     // Cooperative close from the remote side, or our own close() propagating.
     // If we initiated the close (`draining`/`closed`), this is a no-op via #fail's idempotency.
-    this.logger?.error("Transport closed unexpectedly", {
-      error: new QuiryError(WireStatus.PEER_GONE, "Transport closed unexpectedly", {
-        origin: this.#peer ?? undefined,
-      }),
-    });
+    this.logger?.warn("Transport closed unexpectedly");
   };
 
   private readonly onTransportError = (error: TransportError): void => {
@@ -1772,14 +1704,11 @@ export class Session<Ready extends boolean = boolean> {
       error: (() => {
         switch (error.kind) {
           case "terminate":
-            return new QuiryError(WireStatus.PEER_GONE, error.message, {
-              cause: error.cause,
-              origin: this.#peer ?? undefined,
-            });
+            return new QuiryError(WireStatus.PEER_GONE, error.message, { cause: error.cause });
           case "receive":
             return new QuiryError(WireStatus.DATA_LOSS, error.message, { cause: error.cause });
           case "send":
-            return this.transport.state === "closed"
+            return this.transport.state === TransportState.CLOSED
               ? new QuiryError(WireStatus.UNAVAILABLE, error.message, { cause: error.cause })
               : new QuiryError(WireStatus.DATA_LOSS, error.message, { cause: error.cause });
         }

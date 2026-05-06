@@ -1,14 +1,23 @@
 import type { AnyPacket } from "@/interface/packets";
 
-export type ConnectionState = "connecting" | "open" | "draining" | "closed";
-export type BackpressureState = "ok" | "high" | "critical";
+export enum TransportState {
+  OPEN = "open",
+  CLOSED = "closed",
+}
+
+export enum BackpressureState {
+  OK = "ok",
+  HIGH = "high",
+  CRITICAL = "critical",
+}
 
 export interface BackpressureSignal {
   readonly state: BackpressureState;
   readonly depth: number;
 }
 
-export type BackpressureSnapshot = BackpressureSignal & {
+export type BackpressureSnapshot = Omit<BackpressureSignal, "state"> & {
+  readonly state: keyof typeof BackpressureState;
   readonly updatedAt: number;
 };
 
@@ -17,12 +26,12 @@ export interface TransportOptions {
 }
 
 export interface TransportEvents {
-  "state-change": [next: ConnectionState, prev: ConnectionState];
+  "state-change": [next: TransportState, prev: TransportState];
   error: [error: TransportError];
 }
 
 export interface Transport {
-  readonly state: ConnectionState;
+  readonly state: TransportState;
   send(packet: AnyPacket): Promise<void>;
 
   /**
@@ -33,8 +42,8 @@ export interface Transport {
   receive(): AsyncIterableIterator<AnyPacket>;
   readonly backpressure: BackpressureSignal;
 
-  open(): Promise<void>;
-  close(): Promise<void>;
+  attach(): void;
+  dispose(): void;
 
   on<K extends keyof TransportEvents>(event: K, listener: (...args: TransportEvents[K]) => void): () => void;
 }

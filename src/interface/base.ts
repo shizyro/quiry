@@ -2,6 +2,7 @@ declare const __brand: unique symbol;
 type Brand<T, TBrand extends string> = T & { __brand: TBrand };
 
 // Base identifiers with branded types for compile-time safety
+/** @deprecated */
 export type NodeId = Brand<string, "NodeId">;
 export type TraceId = Brand<string, "TraceId">;
 export type CorrelationId = Brand<string, "CorrelationId">;
@@ -17,7 +18,7 @@ export const WireKind = {
   RESPONSE: "RES",
   /** A proxied function argument being invoked by the remote side. */
   CALLBACK: "CBK",
-  /** System-level messages; handshake, heartbeat, drain, peer discovery. */
+  /** System-level messages; handshake, peer discovery, etc. */
   SYSTEM: "SYS",
 } as const;
 export type WireKind = (typeof WireKind)[keyof typeof WireKind];
@@ -65,8 +66,6 @@ export enum WireStatus {
 export interface WirePacket<TKind extends WireKind = WireKind, TPayload = unknown> {
   readonly id: CorrelationId;
   readonly kind: TKind;
-  readonly from: NodeId;
-  readonly to?: NodeId;
   readonly timestamp: number;
   readonly payload: TPayload;
 }
@@ -82,7 +81,6 @@ export interface WirePacket<TKind extends WireKind = WireKind, TPayload = unknow
 export interface WireError {
   readonly status: Exclude<WireStatus, typeof WireStatus.OK>;
   readonly message: string;
-  readonly origin: NodeId;
   readonly correlationId?: CorrelationId;
   readonly traceId?: TraceId;
   readonly detail?: Record<string, unknown>;
@@ -107,6 +105,7 @@ export interface RetryPolicy {
   readonly delay?: number;
 }
 
+/** @deprecated */
 export const HeartbeatStatus = {
   HEALTHY: "healthy",
   DEGRADED: "degraded",
