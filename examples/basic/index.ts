@@ -1,19 +1,88 @@
+import EventEmitter from "node:events";
+import Quiry, { WorkerThreadsTransport } from "@/";
+
 import { isMainThread } from "node:worker_threads";
 import { join } from "node:path";
 
+class GreeterService {
+  greet(name: string): void {
+    console.log(`\n\tHello, ${name}!\n`);
+  }
+}
+
+class MathService {
+  readonly pi: number = Math.PI;
+
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
+  multiply(a: number, b: number): number {
+    return a * b;
+  }
+
+  async *prime(start: number = 2): AsyncIterableIterator<number> {
+    let n = Math.max(2, Math.floor(start));
+    while (true) {
+      if (isPrime(n)) yield n;
+      n++;
+    }
+  }
+}
+
+function isPrime(n: number): boolean {
+  if (n < 2) return false;
+  if (n === 2) return true;
+  if (n % 2 === 0) return false;
+  for (let i = 3; i * i <= n; i += 2) {
+    if (n % i === 0) return false;
+  }
+  return true;
+}
+
+type ExampleEvents = { test: [query?: string] };
+class EventService {
+  readonly emitter = new EventEmitter();
+  get eventNames(): string[] {
+    return this.emitter.eventNames().map(String);
+  }
+
+  on<TEventName extends keyof ExampleEvents>(
+    event: TEventName,
+    listener: (...args: ExampleEvents[TEventName]) => void,
+  ) {
+    this.emitter.on(event, listener);
+  }
+
+  emit<TEventName extends keyof ExampleEvents>(
+    event: TEventName,
+    ...args: ExampleEvents[TEventName]
+  ): boolean {
+    return this.emitter.emit(event, ...args);
+  }
+}
+
+export type ExampleRegistry = {
+  greeter: GreeterService;
+  math: MathService;
+  events: EventService;
+  timer: {
+    delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T>;
+  };
+};
+
 async function bootstrap() {
-  const broker = (await import("./provider")).default;
-  process.on("SIGINT", async () => {
-    console.error("SIGINT received; shutting down...");
-    await broker.shutdown();
-    process.exit(0);
+  Quiry.expose("greeter", new GreeterService());
+  Quiry.expose("math", new MathService());
+  Quiry.expose("events", new EventService());
+  Quiry.expose("timer", {
+    async delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T> {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return handler(1, 2, 3);
+    },
   });
 
-  broker.on("peer-disconnected", (handle) => {
-    console.log(`\u001b[105m Worker ${handle.id} disconnected \u001b[49m`);
-  });
-
-  await broker.spawn(join(__dirname, "worker.ts"));
+  Quiry.spawn(join(__dirname, "worker.ts"));
 }
 
 if (isMainThread) {

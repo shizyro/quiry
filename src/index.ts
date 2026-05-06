@@ -20,18 +20,23 @@ import { isSerializable } from "@/lib/helpers";
 
 import { randomBytes } from "node:crypto";
 
-namespace Quiry {
-  export type PeerIdentifier = string | symbol | number | NodeId;
+export interface GlobalServiceRegistry extends Record<Quiry.PeerIdentifier, ServiceRegistry> {}
 
+namespace Quiry {
   export type CallbackHandle<T extends Function> = T & {
     release(): boolean;
     [Symbol.dispose](): void;
   };
 
-  export class PeerConnection<TServices extends ServiceRegistry = ServiceRegistry> {
+  export type PeerIdentifier = string | symbol | number | NodeId;
+
+  export class PeerConnection<
+    TIdentifier extends PeerIdentifier = PeerIdentifier,
+    TServices extends ServiceRegistry = GlobalServiceRegistry[TIdentifier],
+  > {
     private readonly cached = new Map<keyof TServices, ServiceImpl>();
     constructor(
-      readonly identifier: PeerIdentifier,
+      readonly identifier: TIdentifier,
       private readonly session: Session,
     ) {}
 
@@ -126,8 +131,8 @@ namespace Quiry {
     error: [error: Error];
   }
 
-  export interface AttachOptions {
-    readonly identifier?: PeerIdentifier;
+  export interface AttachOptions<TIdentifier extends PeerIdentifier = PeerIdentifier> {
+    readonly identifier?: TIdentifier;
   }
 }
 
@@ -153,10 +158,17 @@ namespace Quiry {
     return attach(new WorkerThreadsTransport({ worker }));
   }
 
-  export function attach<TServices extends ServiceRegistry = ServiceRegistry>(
+  export function attach<
+    TIdentifier extends PeerIdentifier = PeerIdentifier,
+    TServices extends ServiceRegistry = GlobalServiceRegistry[TIdentifier],
+  >(transport: Transport, options?: AttachOptions<TIdentifier>): PeerConnection<TIdentifier, TServices>;
+
+  export function attach<TServices extends ServiceRegistry>(
     transport: Transport,
-    options: AttachOptions = {},
-  ): PeerConnection<TServices> {
+    options?: AttachOptions,
+  ): PeerConnection<PeerIdentifier, TServices>;
+
+  export function attach(transport: Transport, options: AttachOptions = {}): PeerConnection {
     const identifier = options.identifier ?? (randomBytes(4).toString("hex") as NodeId);
     const session = new Session(transport, inquiry, {}, logger).open();
     if (peers.has(identifier)) {
@@ -183,7 +195,7 @@ namespace Quiry {
 
     logger?.info(`Peer ${String(identifier)} attached`);
     emitter.emit("peer-connected", connection);
-    return connection as PeerConnection<TServices>;
+    return connection;
   }
 
   export async function detach(identifier: PeerIdentifier, kill: boolean = false): Promise<void> {
