@@ -6,6 +6,8 @@ One opinionated implementation of a transparent, type-safe IPC for worker thread
 $ npm install --save quiry
 ```
 
+![Preview](https://github.com/user-attachments/assets/d4177274-e1c3-4f67-a50b-2de3e18c752c)
+
 ---
 
 You expose an object on one side, and use it from the other side as if it were local. Methods, properties, and even generators carry across the boundary.
@@ -128,7 +130,7 @@ await peer.service<StreamService>("stream").subscribe("updates", onEvent);
 onEvent.release();
 
 // or let the runtime handle it
-await using onEvent = peer.callback((event) => handleEvent(event));
+using onEvent = peer.callback((event) => handleEvent(event));
 await peer.service<StreamService>("stream").subscribe("updates", onEvent);
 // the callback is released automatically when the scope exits
 ```

@@ -1,13 +1,24 @@
 {
   "name": "quiry",
   "version": "0.1.3",
+  "description": "Transparent, type-safe IPC for Node worker threads and child processes.",
+  "keywords": ["ipc", "worker", "proxy"],
   "author": {
     "name": "Shizuka Yashiro",
     "email": "shizuka.yashiro@gmail.com"
   },
-  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/shizyro/quiry#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shizyro/quiry.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shizyro/quiry/issues"
+  },
   "type": "module",
-  "files": ["dist"],
+  "sideEffects": false,
+  "files": ["dist", "README.md", "LICENSE"],
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -15,26 +26,21 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "license": "MIT",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
-    "build": "bunchee --sourcemap --target es2022",
+    "build": "bunchee --sourcemap --target es2015",
     "example": "bun examples/basic/index.ts",
     "test": "vitest"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "bunchee": "^6.10.0",
+    "typescript": "^5",
     "vitest": "^4.1.5"
   },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
   "dependencies": {
-    "@types/nanoid": "^3.0.0",
-    "@types/p-limit": "^2.2.0",
-    "nanoid": "^5.1.9",
-    "object-sizeof": "^2.6.5",
-    "p-limit": "^7.3.0",
-    "uuid": "^14.0.0"
+    "nanoid": "^5.1.9"
   }
 }
