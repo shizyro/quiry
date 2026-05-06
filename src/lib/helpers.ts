@@ -37,7 +37,9 @@ export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
-export function isAnyIterable(value: unknown): value is Iterable<unknown> | AsyncIterable<unknown> {
+export function isAnyIterableIterator(
+  value: unknown,
+): value is IterableIterator<unknown> | AsyncIterableIterator<unknown> {
   return (
     typeof value === "object" && value !== null && (Symbol.iterator in value || Symbol.asyncIterator in value)
   );

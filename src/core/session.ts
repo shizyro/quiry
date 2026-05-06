@@ -47,7 +47,7 @@ import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/sha
 
 import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
 
-import { isSerializable, isAnyIterable, clip } from "@/lib/helpers";
+import { isSerializable, isAnyIterableIterator, clip } from "@/lib/helpers";
 import { retryable, timeout, abortable } from "@/lib/utils";
 import { InFlightTracker } from "@/lib/tracker";
 
@@ -87,7 +87,9 @@ function normalize<T = unknown>(value: T, seen?: WeakSet<object>): T {
   return value;
 }
 
-export type InquiryFunc = (request: InquiryRequest) => Promise<unknown> | AsyncIterableIterator<unknown>;
+export type InquiryFunc = (
+  request: InquiryRequest,
+) => Promise<unknown> | AsyncIterableIterator<unknown> | IterableIterator<unknown>;
 export type InquiryRequest = Readonly<{
   service: string;
   property: string;
@@ -127,7 +129,7 @@ interface OutboundStream<T = unknown> {
   /** Pending waiter blocked on credit; resolved with `false` on cancel. */
   waiter: ((ok: boolean) => void) | null;
   cancelled: boolean;
-  iterator: AsyncIterableIterator<T>;
+  iterator: IterableIterator<T> | AsyncIterableIterator<T>;
 }
 
 interface PendingCallbackInvocation<T = unknown> {
@@ -138,14 +140,19 @@ interface PendingCallbackInvocation<T = unknown> {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-export type SessionState = "peering" | "open" | "draining" | "closed";
+export enum SessionState {
+  OPEN = "open",
+  PEERING = "peering",
+  DRAINING = "draining",
+  CLOSED = "closed",
+}
 
 export interface SessionConfig {
-  readonly handshakeTimeout?: number;
   readonly defaultTimeout?: number;
-  readonly drainTimeout?: number;
-  readonly creditWindow?: number;
   readonly defaultRetry?: RetryPolicy;
+  readonly drainTimeout?: number;
+  /** The number of chunks to prefetch for each streaming request. */
+  readonly creditWindow?: number;
 }
 
 export interface SessionEvents {
@@ -179,11 +186,12 @@ export interface InteractiveRouter {
  */
 export class Session {
   private readonly emitter = new EventEmitter();
-  #state: SessionState = "peering";
+  #state: SessionState = SessionState.PEERING;
 
   private readonly config: DeepRequired<SessionConfig>;
   private readonly conveyor: Router<AnyPacket>;
 
+  /** A wrapper around the internal router to provide a more convenient API. */
   get router(): InteractiveRouter {
     return {
       listen: (kind, predicate, handler) =>
@@ -214,7 +222,6 @@ export class Session {
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
 
   readonly #controllers = new Map<CorrelationId, AbortController>();
-  /** The number of chunks to prefetch for each streaming request. */
 
   constructor(
     private readonly transport: Transport,
@@ -224,7 +231,6 @@ export class Session {
   ) {
     this.conveyor = new Router(this.transport.receive());
     this.config = {
-      handshakeTimeout: config.handshakeTimeout ?? 10_000,
       defaultTimeout: config.defaultTimeout ?? 10_000,
       drainTimeout: config.drainTimeout ?? 5000,
       creditWindow: config.creditWindow ?? 100,
@@ -251,7 +257,7 @@ export class Session {
   protected async forward(packet: AnyPacket): Promise<CorrelationId> {
     // Silently drop sends on a closed session. This can happen during teardown
     // when cleanup code attempts to send RELEASE after the transport is gone.
-    if (this.#state !== "closed") {
+    if (this.#state !== SessionState.CLOSED) {
       // TODO: account for backpressure
       await this.transport.send(packet);
     } else this.logger?.trace("Attempted to send packet on closed session");
@@ -264,7 +270,7 @@ export class Session {
     this.#state = state;
     this.emitter.emit("state-change", state, prev);
 
-    this.logger?.debug(`Session state changed to ${state.toUpperCase()}`);
+    this.logger?.debug(`Session state changed to ${state}`);
   }
 
   on<K extends keyof SessionEvents>(
@@ -283,11 +289,8 @@ export class Session {
    * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
    */
   open() {
-    if (this.#state !== "peering")
-      throw new QuiryError(
-        WireStatus.FAILED_PRECONDITION,
-        "Cannot open session that is not in the peering state",
-      );
+    if (this.#state !== SessionState.PEERING)
+      throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot open session in the current state");
 
     this.transport.on("state-change", (next) => next === "closed" && this.onTransportClose());
     this.transport.on("error", this.onTransportError);
@@ -300,7 +303,7 @@ export class Session {
       this.logger?.error("Router source stream errored", { error: QuiryError.from(error) });
       this.terminate();
     });
-    this.transition("open");
+    this.transition(SessionState.OPEN);
 
     this.logger?.info("Established session connection with peer");
     return this;
@@ -312,8 +315,8 @@ export class Session {
    * Multiple concurrent calls collapse onto a single drain promise.
    */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
-    if (this.#state === "closed") return;
-    if (!graceful || this.#state === "peering") return this.terminate();
+    if (this.#state === SessionState.CLOSED) return;
+    if (!graceful || this.#state === SessionState.PEERING) return this.terminate();
     return (this.#drain_promise ??= this.performDrain("local", reason));
   }
 
@@ -344,8 +347,8 @@ export class Session {
     reason: string = "explicit",
     timeout: number = this.config.drainTimeout,
   ): Promise<void> {
-    if (this.#state === "closed") return;
-    if (this.#state !== "draining") this.transition("draining");
+    if (this.#state === SessionState.CLOSED) return;
+    this.transition(SessionState.DRAINING);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -451,9 +454,9 @@ export class Session {
   }
 
   private terminate(reason?: string): void {
-    if (this.#state === "closed") return;
+    if (this.#state === SessionState.CLOSED) return;
     const prev = this.#state;
-    this.#state = "closed";
+    this.#state = SessionState.CLOSED;
 
     // Stop the router; any waiters still pending get rejected with
     // "Stream closed" via the router's own cleanup.
@@ -470,7 +473,7 @@ export class Session {
     this.callbacks.clear();
     this.#inflight_invocations.clear();
 
-    this.emitter.emit("state-change", "closed", prev);
+    this.emitter.emit("state-change", SessionState.CLOSED, prev);
     this.emitter.emit("terminate", reason);
 
     try {
@@ -481,7 +484,7 @@ export class Session {
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
 
   async get(service: string, property: string): Promise<unknown> {
-    if (this.#state !== "open") {
+    if (this.#state !== SessionState.OPEN) {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
 
@@ -539,7 +542,7 @@ export class Session {
     control?: Omit<RequestControl, "abortable">,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    if (this.#state !== "open") {
+    if (this.#state !== SessionState.OPEN) {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open", { traceId: control?.traceId });
     }
 
@@ -669,7 +672,7 @@ export class Session {
     control?: Omit<RequestControl, "abortable">,
     signal?: AbortSignal, // TODO: umm... decide on this
   ): AsyncIterableIterator<unknown> {
-    if (this.#state !== "open") {
+    if (this.#state !== SessionState.OPEN) {
       const q = new AsyncQueue<unknown>();
       void q.throw(new QuiryError(WireStatus.UNAVAILABLE, "Session is not open"));
       return q;
@@ -903,7 +906,7 @@ export class Session {
   private handleSystemPacket(packet: AnySystemPacket): void {
     switch (packet.type) {
       case SystemMessageType.DRAIN: {
-        if (this.#state === "closed") return;
+        if (this.#state === SessionState.CLOSED) return;
 
         // Capture the peer's DRAIN correlation id. The terminal
         // `DRAIN_ACK` sent at the end of `performDrain` will reference
@@ -911,7 +914,7 @@ export class Session {
         // "ACK means I'm done" semantic.
         this.#peer_drain_ref = packet.id;
 
-        if (this.#state === "draining") {
+        if (this.#state === SessionState.DRAINING) {
           // Concurrent drain (or a stray re-send from the peer).
           // If our own work already finished, fire an ACK inline —
           // the condition ACK demands is already satisfied and the
@@ -929,7 +932,7 @@ export class Session {
 
         // Handshake hasn't completed — DRAIN before OPEN is nonsense
         // from a conforming peer. Drop.
-        if (this.#state !== "open") return;
+        if (this.#state !== SessionState.OPEN) return;
 
         // Remote-initiated drain: run the same coroutine, just without
         // the "announce" step. Our terminal ACK will fire once we
@@ -968,7 +971,7 @@ export class Session {
     };
 
     this.inbound.run(async () => {
-      if (this.#state === "draining") {
+      if (this.#state === SessionState.DRAINING) {
         return await this.send({
           kind: WireKind.RESPONSE,
           type: ResponseMessageType.VALUE,
@@ -1016,7 +1019,7 @@ export class Session {
       try {
         const result = this.inquiry(request);
 
-        if (isAnyIterable(result)) {
+        if (isAnyIterableIterator(result)) {
           // Streaming results must be detected *before* the serialization
           // check: async iterators have a non-plain prototype and would
           // otherwise be rejected as non-serializable. Individual chunks are
@@ -1369,7 +1372,7 @@ export class Session {
    */
   private async streamOutboundResponse(
     ref: CorrelationId,
-    iterable: AsyncIterableIterator<unknown>,
+    iterable: IterableIterator<unknown> | AsyncIterableIterator<unknown>,
   ): Promise<void> {
     const stream: OutboundStream = {
       credit: 0,
@@ -1715,14 +1718,14 @@ export class Session {
   // --------- INTERNALS: EVENT HANDLERS --------- //
 
   private readonly onTransportClose = (): void => {
-    if (this.#state === "closed" || this.#state === "draining") return;
+    if (this.#state === SessionState.CLOSED || this.#state === SessionState.DRAINING) return;
     // Cooperative close from the remote side, or our own close() propagating.
     // If we initiated the close (`draining`/`closed`), this is a no-op via #fail's idempotency.
     this.logger?.warn("Transport closed unexpectedly");
   };
 
   private readonly onTransportError = (error: TransportError): void => {
-    if (this.#state === "closed" || this.#state === "draining") return;
+    if (this.#state === SessionState.CLOSED || this.#state === SessionState.DRAINING) return;
     // Map TransportError.kind → WireStatus. Transport errors never escape the
     // transport unclassified — this is the only place that translation happens.
     this.logger?.error("Transport error", {

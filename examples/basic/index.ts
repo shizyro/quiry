@@ -21,7 +21,7 @@ class MathService {
     return a * b;
   }
 
-  async *prime(start: number = 2): AsyncIterableIterator<number> {
+  *prime(start: number = 2): Generator<number> {
     let n = Math.max(2, Math.floor(start));
     while (true) {
       if (isPrime(n)) yield n;

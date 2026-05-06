@@ -19,7 +19,7 @@ describe("Session streaming", () => {
 
   it("chunks flow in order through end-of-stream", async () => {
     pair = await openSessionPair({
-      producerInquiry: async function* (request: InquiryRequest) {
+      producerInquiry: function* (request: InquiryRequest) {
         const [start, end] = request.args as [number, number];
         for (let i = start; i < end; i++) yield i;
       },
@@ -34,7 +34,7 @@ describe("Session streaming", () => {
 
   it("propagates producer errors to the consumer", async () => {
     pair = await openSessionPair({
-      producerInquiry: async function* () {
+      producerInquiry: function* () {
         yield "a";
         yield "b";
         throw new Error("producer failed");
@@ -103,7 +103,7 @@ describe("Session streaming", () => {
     let producerEmitted = 0;
 
     pair = await openSessionPair({
-      producerInquiry: async function* () {
+      producerInquiry: function* () {
         for (let i = 0; i < total; i++) {
           producerEmitted = i + 1;
           yield i;

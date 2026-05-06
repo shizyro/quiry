@@ -16,7 +16,7 @@ import { ChildProcessTransport } from "@/core/transport/child-process";
 import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
 
 import { attachCallerStack, captureCallerStack, QuiryError } from "@/shared/errors";
-import { isSerializable } from "@/lib/helpers";
+import { isAnyIterableIterator, isSerializable } from "@/lib/helpers";
 
 import { randomBytes } from "node:crypto";
 
@@ -239,6 +239,9 @@ namespace Quiry {
   export function expose<TName extends string, TImpl extends ServiceImpl>(name: TName, impl: TImpl): void {
     if (services.has(name))
       throw new QuiryError(WireStatus.FAILED_PRECONDITION, `Service ${name} already exposed`);
+    if (typeof impl !== "object" || impl === null || Array.isArray(impl))
+      throw new QuiryError(WireStatus.INVALID_ARGUMENT, `Service ${name} must be an object`);
+
     services.set(name, impl);
   }
 
@@ -289,7 +292,7 @@ namespace Quiry {
     }
 
     if (typeof result === "object" && result !== null) {
-      if (Symbol.asyncIterator in result) return result as AsyncIterableIterator<unknown>;
+      if (isAnyIterableIterator(result)) return result;
       if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
     }
 
