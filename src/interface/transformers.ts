@@ -10,13 +10,30 @@ type AnyConstructor = new (...args: any[]) => any;
 
 type IsAsyncIterFn<T> = T extends (...args: any[]) => AsyncIterable<any> ? true : false;
 /** Sync iterators (incl. sync generators) — proxied as async iterators on the remote side. */
-type IsSyncIterFn<T> =
-  T extends (...args: any[]) => Iterable<any>
-    ? T extends (...args: any[]) => AsyncIterable<any>
-      ? false
-      : true
-    : false;
+type IsSyncIterFn<T> = T extends (...args: any[]) => Iterable<any>
+  ? T extends (...args: any[]) => AsyncIterable<any>
+    ? false
+    : true
+  : false;
 type IsAsyncFn<T> = T extends (...args: any[]) => Promise<any> ? true : false;
+
+/** Convert a function to an async-returning version. */
+type AsyncifyFunction<F> = F extends (...args: infer A) => infer R
+  ? (...args: A) => Promise<Awaited<R>>
+  : never;
+
+type DeepAsync<T> =
+  // functions -> async functions
+  T extends AnyFn
+    ? AsyncifyFunction<T>
+    : // arrays -> recursively transform elements
+      T extends readonly (infer U)[]
+      ? ReadonlyArray<DeepAsync<U>>
+      : // objects -> recursively transform properties
+        T extends object
+        ? { [K in keyof T]: DeepAsync<T[K]> }
+        : // primitives stay unchanged
+          T;
 
 // Method return type extraction
 
@@ -37,7 +54,7 @@ type RemoteMethod<T> = T extends AnyFn
       ? (...args: Parameters<T>) => AsyncIterableIterator<UnwrapIterable<ReturnType<T>>> // sync gen -> async stream
       : IsAsyncFn<T> extends true
         ? T // already async, no transformation needed
-        : (...args: Parameters<T>) => Promise<ReturnType<T>> // wrap sync in promise
+        : (...args: Parameters<T>) => Promise<DeepAsync<ReturnType<T>>> // wrap sync in promise
   : never; // non-callable members are excluded entirely
 
 // Filter for callable members
