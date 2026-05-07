@@ -1,5 +1,5 @@
 import EventEmitter from "node:events";
-import type { AnyPacket } from "@/interface/packets";
+import type { AnyPacket } from "../../interface/packets";
 
 import {
   TransportError,
@@ -10,8 +10,8 @@ import {
   BackpressureState,
 } from ".";
 
-import { PacketQueue } from "./lib/packet-queue";
-import { isWirePacket } from "@/lib/helpers";
+import { PacketQueue } from "./packet-queue";
+import { isWirePacket } from "../../lib/helpers";
 
 const BACKPRESSURE_HIGH = 100; // packets
 const BACKPRESSURE_CRITICAL = 500;

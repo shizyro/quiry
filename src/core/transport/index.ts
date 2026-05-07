@@ -1,4 +1,4 @@
-import type { AnyPacket } from "@/interface/packets";
+import type { AnyPacket } from "../../interface/packets";
 
 export enum TransportState {
   OPEN = "open",

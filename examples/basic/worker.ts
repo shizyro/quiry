@@ -1,4 +1,4 @@
-import Quiry, { WorkerThreadsTransport } from "@/";
+import Quiry, { WorkerThreadsTransport } from "~/";
 import type { ExampleRegistry } from "./index";
 
 function log(...data: any[]) {

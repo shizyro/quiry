@@ -1,8 +1,8 @@
 import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import type { MessagePort, Transferable } from "node:worker_threads";
 
-import { BaseTransport } from "./base";
-import { TransportError, TransportState, type TransportOptions } from ".";
+import { BaseTransport } from "../base";
+import { TransportError, TransportState, type TransportOptions } from "..";
 
 export interface WorkerThreadsTransportOptions extends TransportOptions {
   readonly worker?: Worker;

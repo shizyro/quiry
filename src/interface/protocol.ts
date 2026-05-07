@@ -1,14 +1,4 @@
-declare const __brand: unique symbol;
-type Brand<T, TBrand extends string> = T & { __brand: TBrand };
-
-// Base identifiers with branded types for compile-time safety
-/** @deprecated */
-export type NodeId = Brand<string, "NodeId">;
-export type TraceId = Brand<string, "TraceId">;
-export type CorrelationId = Brand<string, "CorrelationId">;
-
-export type CallbackId = Brand<string, "CallbackId">;
-export type InvocationId = Brand<string, "InvocationId">;
+import type { CorrelationId, TraceId } from "./types";
 
 /** Wire protocol enums */
 export const WireKind = {
@@ -114,6 +104,7 @@ export const HeartbeatStatus = {
 } as const;
 export type HeartbeatStatus = (typeof HeartbeatStatus)[keyof typeof HeartbeatStatus];
 
+/** @deprecated */
 export interface MetricsData {
   readonly memory?: {
     readonly heapUsed: number;

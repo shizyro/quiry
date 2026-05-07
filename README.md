@@ -21,6 +21,9 @@ If it looks like a function, you call it. If it looks like a value, you read it.
 // host.ts
 import Quiry from "quiry";
 
+// spawn a worker/child_process
+Quiry.fork(join(__dirname, "child.ts"));
+
 class MathService {
   version: string = "1.0.0";
   
@@ -30,8 +33,8 @@ class MathService {
   }
 }
 
+// expose a service with a unique identifier
 Quiry.expose("math", new MathService());
-Quiry.fork(join(__dirname, "child.ts"));
 
 export type ServiceRegistry = {
   math: MathService;
@@ -43,6 +46,7 @@ export type ServiceRegistry = {
 import Quiry, { ChildProcessTransport } from "quiry";
 import type { ServiceRegistry } from "./host";
 
+// attach to host, and keep a peer reference to later query exposed services
 const peer = Quiry.attach<ServiceRegistry>(new ChildProcessTransport());
 const math = peer.service("math"); // typed RemoteServiceDefinition<MathService>
 
@@ -74,14 +78,14 @@ declare module "quiry" {
 `Quiry.fork()` and `Quiry.spawn()` are convenience methods that handle transport construction. If you need more control over the worker instance, you can construct it yourself and attach manually:
 
 ```typescript
-const worker = new Worker("./worker.ts");
+const worker = new Worker("worker.ts");
 Quiry.attach(new WorkerThreadsTransport({ worker }));
 ```
 
 
 ## Streaming
 
-Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks (via `yield` [generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator)) as it becomes available rather than waiting for the full result. Normally across such boundary, this would require some of an emitter, manual chunking over wire, or batching. None of those are particularly clean, and more importantly, none of them are how you'd write it locally.
+Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks as it becomes available rather than waiting for the full result, this is done through [Generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator). Normally across such boundary, this would require some of an emitter, manual chunking over wire, or batching. None of those are particularly clean, and more importantly, none of them are how you'd write it locally.
 
 Streams should be pulled, not pushed. The problem is that there's no reliable way to know at runtime whether a remote method is a generator or a regular function. A separate opt-in API would feel off as well.
 
@@ -156,7 +160,7 @@ await off();
 // the callback is released from peer side when it's no longer used
 ```
 
-These returned function stubs are session-scoped on the caller side. They live for as long as the caller holds a reference, and are automatically released from remote side once the stub is garbage collected. This done via the Javascript [FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry) observability, in which it's used to [eventually](https://github.com/tc39/proposal-weakrefs#a-note-of-caution) notify the remote peer.
+These returned function stubs are session-scoped on the caller side. They live for as long as the caller holds a reference, and are automatically released from remote side once the stub is **no longer referenced**, and it is reclaimed by GC. This done via the Javascript [FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry) observability, in which it's used to [eventually](https://github.com/tc39/proposal-weakrefs#a-note-of-caution) notify the remote peer.
 
 
 ## Limitations

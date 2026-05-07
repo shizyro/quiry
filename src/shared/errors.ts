@@ -6,8 +6,9 @@
 
 import { inspect } from "node:util";
 
-import { WireStatus, type WireError, type CorrelationId, type TraceId } from "@/interface/base";
-import { isSerializable } from "@/lib/helpers";
+import { WireStatus, type WireError } from "../interface/protocol";
+import type { CorrelationId, TraceId } from "../interface/types";
+import { isSerializable } from "../lib/helpers";
 
 export type NonOkWireStatus = Exclude<WireStatus, typeof WireStatus.OK>;
 export type RetryableWireStatus =

@@ -1,4 +1,4 @@
-import { Session, type InquiryFunc, type SessionConfig } from "@/core/session";
+import { Session, type InquiryFunc, type SessionConfig } from "~/core/session";
 import { pairTransports } from "./mock-transport";
 
 export type SessionPair = { producer: Session; consumer: Session; close: (force?: boolean) => Promise<void> };

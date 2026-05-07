@@ -1,16 +1,5 @@
-import type {
-  NodeId,
-  CorrelationId,
-  InvocationId,
-  CallbackId,
-  WireKind,
-  WirePacket,
-  WireError,
-  WireStatus,
-  MetricsData,
-  HeartbeatStatus,
-  RequestControl,
-} from "./base";
+import type { WireKind, WirePacket, WireError, WireStatus, RequestControl } from "./protocol";
+import type { CorrelationId, InvocationId, CallbackId } from "./types";
 
 /** Typed wire packet with message type discrimination. */
 export interface TypedWirePacket<TKind extends WireKind, TType extends string, TPayload = unknown>
@@ -178,34 +167,10 @@ export interface CallbackReleasePacket
 // --------- SYSTEM PACKETS --------- //
 
 export const SystemMessageType = {
-  HANDSHAKE: "handshake",
-  IDENTIFY: "identify",
-  IDENTIFY_ACK: "identify_ack",
-  HEARTBEAT: "heartbeat", // Heartbeat does not need an ack... right?
   DRAIN: "drain",
   DRAIN_ACK: "drain_ack",
 } as const;
 export type SystemMessageType = (typeof SystemMessageType)[keyof typeof SystemMessageType];
-
-export type HandshakePayload = {
-  readonly nodeId: NodeId;
-  readonly threadId: number;
-  readonly pid: number;
-};
-
-export type IdentifyPayload = {
-  // Might need to add more fields here...
-};
-
-export type IdentifyAckPayload = WithRef<{
-  readonly services: ReadonlyArray<string>;
-  // ...
-}>;
-
-export type HeartbeatPayload = {
-  readonly status: HeartbeatStatus;
-  readonly metrics?: MetricsData;
-};
 
 export type DrainPayload = {
   readonly reason?: string;
@@ -216,32 +181,6 @@ export type DrainAckPayload = WithRef<{
   readonly uptime?: number;
 }>;
 
-/** @deprecated */
-export interface SystemHandshakePacket
-  extends Omit<
-    TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.HANDSHAKE, HandshakePayload>,
-    "from"
-  > {}
-
-/**
- * A packet sent to identify itself to the peer.
- * @deprecated
- */
-export interface SystemIdentifyPacket
-  extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.IDENTIFY, IdentifyPayload> {}
-
-/** @deprecated */
-export interface SystemIdentifyAckPacket
-  extends TypedWirePacket<
-    typeof WireKind.SYSTEM,
-    typeof SystemMessageType.IDENTIFY_ACK,
-    IdentifyAckPayload
-  > {}
-
-/** @deprecated */
-export interface SystemHeartbeatPacket
-  extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.HEARTBEAT, HeartbeatPayload> {}
-
 export interface SystemDrainPacket
   extends TypedWirePacket<typeof WireKind.SYSTEM, typeof SystemMessageType.DRAIN, DrainPayload> {}
 
@@ -250,13 +189,6 @@ export interface SystemDrainAckPacket
 
 // --------- UNION TYPES --------- //
 
-export type AnySystemPacket =
-  | SystemHandshakePacket
-  | SystemIdentifyPacket
-  | SystemIdentifyAckPacket
-  | SystemHeartbeatPacket
-  | SystemDrainPacket
-  | SystemDrainAckPacket;
 export type AnyRequestPacket =
   | CallRequestPacket
   | AbortRequestPacket
@@ -264,6 +196,7 @@ export type AnyRequestPacket =
   | GetRequestPacket;
 export type AnyResponsePacket = ValueResponsePacket | StreamResponsePacket;
 export type AnyCallbackPacket = CallbackInvokePacket | CallbackReturnPacket | CallbackReleasePacket;
+export type AnySystemPacket = SystemDrainPacket | SystemDrainAckPacket;
 
 export type AnyPacket = AnySystemPacket | AnyRequestPacket | AnyResponsePacket | AnyCallbackPacket;
 export type AnyTypedPacket = AnyPacket;

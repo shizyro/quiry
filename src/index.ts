@@ -2,21 +2,17 @@ import EventEmitter from "node:events";
 import { fork as NJSFork, type ForkOptions as NJSForkOptions } from "node:child_process";
 import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 
-import { Normalized, Session, type InquiryFunc, type InquiryRequest } from "@/core/session";
-import { WireStatus, type NodeId, type RequestControl } from "@/interface/base";
-import type {
-  ServiceImpl,
-  ServiceRegistry,
-  RemotablePropertyKeys,
-  RemoteServiceDefinition,
-} from "@/interface/transformers";
+import { Normalized, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
+import { WireStatus, type RequestControl } from "./interface/protocol";
+import type { ServiceRegistry, ServiceImpl } from "./interface/types";
+import type { RemotablePropertyKeys, RemoteServiceDefinition } from "./interface/transformers";
 
-import type { Transport } from "@/core/transport";
-import { ChildProcessTransport } from "@/core/transport/child-process";
-import { WorkerThreadsTransport } from "@/core/transport/worker-threads";
+import type { Transport } from "./core/transport";
+import { ChildProcessTransport } from "./core/transport/impl/child-process";
+import { WorkerThreadsTransport } from "./core/transport/impl/worker-threads";
 
-import { attachCallerStack, captureCallerStack, QuiryError } from "@/shared/errors";
-import { isAnyIterableIterator, isSerializable } from "@/lib/helpers";
+import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/errors";
+import { isAnyIterableIterator, isSerializable } from "./lib/helpers";
 
 import { randomBytes } from "node:crypto";
 
@@ -29,7 +25,7 @@ namespace Quiry {
     [Symbol.asyncDispose](): void;
   };
 
-  export type PeerIdentifier = string | symbol | number | NodeId;
+  export type PeerIdentifier = string | symbol | number;
 
   export class PeerConnection<
     TIdentifier extends PeerIdentifier = PeerIdentifier,
@@ -491,6 +487,6 @@ function splitArgsAndOptions(rest: unknown[]): [unknown[], RequestControl | unde
   return [rest.slice(0, -1), tail as RequestControl];
 }
 
-export * from "@/internal";
-export { QuiryError } from "@/shared/errors";
+export * from "./internal";
+export { QuiryError } from "./shared/errors";
 export default Quiry;

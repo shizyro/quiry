@@ -8,8 +8,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "declaration": true,
-    "outDir": "./dist",
-    "paths": { "@/*": ["./src/*"] }
+    "outDir": "./dist"
   },
   "include": ["./src/**/*.ts", "./examples/**/*.ts", "./tests/**/*.ts"],
   "exclude": ["./node_modules", "./dist"]

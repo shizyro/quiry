@@ -1,6 +1,4 @@
-import { WireStatus } from "@/interface/base";
-import type { InquiryRequest } from "@/core/session";
-
+import { WireStatus } from "~/interface/protocol";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
 /**
@@ -20,7 +18,7 @@ describe("Session callbacks", () => {
     it("a function passed in args is invoked from the producer's inquiry and returns its value", async () => {
       let observed: unknown = null;
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const cb = req.args[0] as (x: number) => Promise<number>;
           observed = await cb(7);
           return "ok";
@@ -38,7 +36,7 @@ describe("Session callbacks", () => {
     it("a callback nested one level inside a plain-object arg is invoked too", async () => {
       const ticks: number[] = [];
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const config = req.args[0] as { name: string; tick: (n: number) => Promise<void> };
           expect(config.name).toBe("alpha");
           expect(config.tick).toBeTypeOf("function");
@@ -64,7 +62,7 @@ describe("Session callbacks", () => {
       const a = vi.fn((x: number) => x + 1);
       const b = vi.fn((x: number) => x * 10);
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const [cbA, cbB, num] = req.args as [
             (x: number) => Promise<number>,
             (x: number) => Promise<number>,
@@ -110,7 +108,7 @@ describe("Session callbacks", () => {
 
     it("does not leave the producer-side stub map populated after the request settles", async () => {
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const cb = req.args[0] as () => Promise<void>;
           await cb();
           return null;
@@ -134,7 +132,7 @@ describe("Session callbacks", () => {
       let invocationFinished = false;
 
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const cb = req.args[0] as () => Promise<void>;
           // Fire the callback without awaiting; the consumer will
           // not finish executing it until the test resolves
@@ -177,7 +175,7 @@ describe("Session callbacks", () => {
     it("a bound stub is reusable across multiple requests", async () => {
       const fn = vi.fn((x: number) => x + 100);
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const cb = req.args[0] as (x: number) => Promise<number>;
           return await cb(req.args[1] as number);
         },
@@ -195,7 +193,7 @@ describe("Session callbacks", () => {
     it("stack-scoped stubs survive RELEASE round-trips for unrelated local callbacks", async () => {
       const stackFn = vi.fn(() => "stack");
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const stack = req.args[0] as () => Promise<string>;
           const local = req.args[1] as () => Promise<string>;
           return Promise.all([stack(), local()]);
@@ -214,7 +212,7 @@ describe("Session callbacks", () => {
     it("invoking a stack-scoped callback after local release returns undefined to the proxy caller", async () => {
       const observations: unknown[] = [];
       pair = await openSessionPair({
-        producerInquiry: async (req: InquiryRequest) => {
+        producerInquiry: async (req) => {
           const cb = req.args[0] as () => Promise<unknown>;
           // Yield so the consumer's release(...) below has time to run
           // before the producer dispatches the INVOKE.
@@ -237,7 +235,7 @@ describe("Session callbacks", () => {
       it("forwards positional args verbatim to the local callback", async () => {
         const seen: unknown[][] = [];
         pair = await openSessionPair({
-          producerInquiry: async (req: InquiryRequest) => {
+          producerInquiry: async (req) => {
             const cb = req.args[0] as (...args: unknown[]) => Promise<void>;
             await cb(1, "two", { three: 3 }, [4, 5]);
             return null;
@@ -256,7 +254,7 @@ describe("Session callbacks", () => {
       it("the callback's return value flows back to the producer's await", async () => {
         let received: unknown = null;
         pair = await openSessionPair({
-          producerInquiry: async (req: InquiryRequest) => {
+          producerInquiry: async (req) => {
             const cb = req.args[0] as () => Promise<unknown>;
             received = await cb();
             return null;
@@ -270,7 +268,7 @@ describe("Session callbacks", () => {
       it("a callback that throws on the consumer side resolves the proxy with undefined (fire-and-forget)", async () => {
         let received: unknown = "untouched";
         pair = await openSessionPair({
-          producerInquiry: async (req: InquiryRequest) => {
+          producerInquiry: async (req) => {
             const cb = req.args[0] as () => Promise<unknown>;
             // The proxy's outer `.catch` swallows wire-level errors and
             // resolves with undefined. Tests on the producer side observe
@@ -290,7 +288,7 @@ describe("Session callbacks", () => {
 
       it("the producer's outbound counter stays balanced when the callback returns", async () => {
         pair = await openSessionPair({
-          producerInquiry: async (req: InquiryRequest) => {
+          producerInquiry: async (req) => {
             const cb = req.args[0] as () => Promise<unknown>;
             await cb();
             return null;

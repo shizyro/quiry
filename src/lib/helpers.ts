@@ -1,4 +1,4 @@
-import type { AnyPacket } from "@/interface/packets";
+import type { AnyPacket } from "../interface/packets";
 
 /**
  * Whether `value` is safe for structured clone / typical IPC payloads (plain data only).

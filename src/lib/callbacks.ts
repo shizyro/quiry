@@ -1,5 +1,5 @@
-import { isPlainObject } from "@/lib/helpers";
-import type { CallbackId, CorrelationId } from "@/interface/base";
+import { isPlainObject } from "./helpers";
+import type { CallbackId, CorrelationId } from "../interface/types";
 
 import { nanoid } from "nanoid";
 

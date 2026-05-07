@@ -6,6 +6,6 @@ export default defineConfig({
     includeSource: ["./src/**/*.ts"],
   },
   resolve: {
-    alias: { "@": "./src" },
+    alias: { "~": "./src" },
   },
 });

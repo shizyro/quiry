@@ -3,6 +3,8 @@
  * equivalent remote proxy surface.
  */
 
+import type { ServiceRegistry } from "./types";
+
 // Helper types for service transformation
 
 type AnyFn = (...args: any[]) => any;
@@ -80,9 +82,6 @@ export type RemoteServiceDefinition<T> = {
   [K in RemotablePropertyKeys<T>]: Promise<T[K]>;
 };
 
-export type ServiceImpl = object;
-/** A registry of named services. */
-export type ServiceRegistry = Record<string, ServiceImpl>;
 /** Wraps service registry in a readonly interface with remote service proxies. */
 export type MappedServiceRegistry<S extends ServiceRegistry> = {
   readonly [K in keyof S]: RemoteServiceDefinition<S[K]>;

@@ -1,16 +1,16 @@
-export { Session, type SessionConfig, type SessionState, type SessionStatus } from "@/core/session";
+export { Session, type SessionConfig, type SessionState, type SessionStatus } from "./core/session";
 export {
   TransportError,
   type Transport,
   type TransportOptions,
   type TransportEvents,
-} from "@/core/transport";
+} from "./core/transport";
 
-export { BaseTransport } from "@/core/transport/base";
-export { WorkerThreadsTransport } from "@/core/transport/worker-threads";
-export { ChildProcessTransport } from "@/core/transport/child-process";
+export { BaseTransport } from "./core/transport/base";
+export { ChildProcessTransport } from "./core/transport/impl/child-process";
+export { WorkerThreadsTransport } from "./core/transport/impl/worker-threads";
 
-export * from "@/interface/packets";
+export * from "./interface/packets";
 export {
   WireKind,
   WireStatus,
@@ -19,5 +19,5 @@ export {
   type MetricsData,
   type RequestControl,
   type RetryPolicy,
-} from "@/interface/base";
-export type { CallbackId, InvocationId, CorrelationId, TraceId } from "@/interface/base";
+} from "./interface/protocol";
+export type { CallbackId, InvocationId, CorrelationId, TraceId } from "./interface/types";

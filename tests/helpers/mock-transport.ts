@@ -1,15 +1,15 @@
 import EventEmitter from "node:events";
 
-import type { AnyPacket } from "@/interface/packets";
+import type { AnyPacket } from "~/interface/packets";
 import {
   type Transport,
   type TransportError,
   type BackpressureSignal,
   TransportState,
   BackpressureState,
-} from "@/core/transport";
+} from "~/core/transport";
 
-import { PacketQueue } from "@/core/transport/lib/packet-queue";
+import { PacketQueue } from "~/core/transport/packet-queue";
 
 interface MockEvents {
   "state-change": [next: TransportState, prev: TransportState];

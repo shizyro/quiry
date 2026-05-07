@@ -1,5 +1,4 @@
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
-import type { InquiryRequest } from "@/core/session";
 
 /**
  * Tests the consumer-/producer-side streaming flow end-to-end through a pair
@@ -19,7 +18,7 @@ describe("Session streaming", () => {
 
   it("chunks flow in order through end-of-stream", async () => {
     pair = await openSessionPair({
-      producerInquiry: function* (request: InquiryRequest) {
+      producerInquiry: function* (request) {
         const [start, end] = request.args as [number, number];
         for (let i = start; i < end; i++) yield i;
       },

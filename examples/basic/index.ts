@@ -1,9 +1,10 @@
-import EventEmitter from "node:events";
-import Quiry, { WorkerThreadsTransport } from "@/";
+import Quiry from "~/";
 
 import { isMainThread } from "node:worker_threads";
 import { openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+
+import EventEmitter from "node:events";
 
 class GreeterService {
   greet(name: string): void {

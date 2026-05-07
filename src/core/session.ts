@@ -1,20 +1,8 @@
 import EventEmitter from "node:events";
 
-import {
-  TransportState,
-  type BackpressureSignal,
-  type Transport,
-  type TransportError,
-} from "@/core/transport";
-import {
-  WireKind,
-  WireStatus,
-  type CallbackId,
-  type CorrelationId,
-  type InvocationId,
-  type RequestControl,
-  type RetryPolicy,
-} from "@/interface/base";
+import { TransportState, type Transport, type BackpressureSignal, type TransportError } from "./transport";
+import { WireKind, WireStatus, type RequestControl, type RetryPolicy } from "../interface/protocol";
+import type { CorrelationId, InvocationId, CallbackId } from "../interface/types";
 
 import {
   CallbackMessageType,
@@ -39,17 +27,17 @@ import {
   type SystemDrainAckPacket,
   type SystemDrainPacket,
   type ValueResponsePacket,
-} from "@/interface/packets";
+} from "../interface/packets";
 
-import { Router } from "@/lib/router";
-import { AsyncQueue } from "@/lib/queue";
-import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "@/shared/errors";
+import { Router } from "../lib/router";
+import { AsyncQueue } from "../lib/queue";
+import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "../shared/errors";
 
-import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "@/lib/callbacks";
+import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "../lib/callbacks";
 
-import { isSerializable, isAnyIterableIterator } from "@/lib/helpers";
-import { retryable, timeout, abortable } from "@/lib/utils";
-import { InFlightTracker } from "@/lib/tracker";
+import { isSerializable, isAnyIterableIterator } from "../lib/helpers";
+import { retryable, timeout, abortable } from "../lib/utils";
+import { InFlightTracker } from "../lib/tracker";
 
 import { nanoid } from "nanoid";
 
@@ -142,7 +130,6 @@ interface PendingCallbackInvocation<T = unknown> {
 
 export enum SessionState {
   OPEN = "open",
-  PEERING = "peering",
   DRAINING = "draining",
   CLOSED = "closed",
 }
@@ -186,7 +173,7 @@ export interface InteractiveRouter {
  */
 export class Session {
   private readonly emitter = new EventEmitter();
-  #state: SessionState = SessionState.PEERING;
+  #state: SessionState = SessionState.CLOSED;
 
   private readonly config: DeepRequired<SessionConfig>;
   private readonly conveyor: Router<AnyPacket>;
@@ -300,7 +287,7 @@ export class Session {
    * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
    */
   open() {
-    if (this.#state !== SessionState.PEERING)
+    if (this.#state !== SessionState.CLOSED)
       throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot open session in the current state");
 
     this.transport.on("state-change", (next) => next === "closed" && this.onTransportClose());
@@ -327,7 +314,7 @@ export class Session {
    */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
     if (this.#state === SessionState.CLOSED) return;
-    if (!graceful || this.#state === SessionState.PEERING) return this.terminate();
+    if (!graceful) return this.terminate();
     return (this.#drain_promise ??= this.performDrain("local", reason));
   }
 
@@ -466,7 +453,7 @@ export class Session {
 
   private terminate(reason?: string): void {
     if (this.#state === SessionState.CLOSED) return;
-    const prev = this.#state;
+    const previous = this.#state;
     this.#state = SessionState.CLOSED;
 
     // Stop the router; any waiters still pending get rejected with
@@ -484,7 +471,7 @@ export class Session {
     this.callbacks.clear();
     this.#inflight_invocations.clear();
 
-    this.emitter.emit("state-change", SessionState.CLOSED, prev);
+    this.emitter.emit("state-change", SessionState.CLOSED, previous);
     this.emitter.emit("terminate", reason);
 
     try {
@@ -941,8 +928,7 @@ export class Session {
           return;
         }
 
-        // Handshake hasn't completed — DRAIN before OPEN is nonsense
-        // from a conforming peer. Drop.
+        // DRAIN before OPEN is nonsense from a conforming peer. Drop.
         if (this.#state !== SessionState.OPEN) return;
 
         // Remote-initiated drain: run the same coroutine, just without

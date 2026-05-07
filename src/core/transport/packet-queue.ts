@@ -1,5 +1,5 @@
-import { Queue } from "@/lib/queue";
-import type { AnyPacket } from "@/interface/packets";
+import { Queue } from "../../lib/queue";
+import type { AnyPacket } from "../../interface/packets";
 
 interface Deferred {
   resolve: (value?: unknown) => void;

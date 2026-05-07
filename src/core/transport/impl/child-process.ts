@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 
-import { BaseTransport } from "./base";
-import { TransportError, TransportState, type TransportOptions } from ".";
+import { BaseTransport } from "../base";
+import { TransportError, TransportState, type TransportOptions } from "..";
 
 export interface ChildProcessTransportOptions extends TransportOptions {
   readonly child?: ChildProcess;
