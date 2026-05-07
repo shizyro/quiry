@@ -1,8 +1,53 @@
-import type { AnyPacket } from "../../interface/packets";
-
 export enum TransportState {
   OPEN = "open",
   CLOSED = "closed",
+}
+
+export interface TransportOptions {
+  // Nothing here, yet.
+}
+
+export interface TransportEvents {
+  open: [];
+  close: [reason?: string];
+  error: [error: TransportError];
+}
+
+export interface Transport<T = unknown> {
+  readonly state: TransportState;
+  send(packet: T): Promise<void>;
+
+  /**
+   * Pull-based, the session drives consumption.
+   * Naturally applies backpressure. If the consumer stops pulling,
+   * the transport can signal the sender to slow down.
+   */
+  receive(): AsyncIterableIterator<T>;
+  readonly backpressure: BackpressureSignal;
+
+  open(): void;
+  close(reason?: string): void;
+
+  on<K extends keyof TransportEvents>(event: K, listener: (...args: TransportEvents[K]) => void): Unsubscribe;
+}
+
+export type TransportErrorKind = "send" | "receive" | "terminate";
+
+export interface TransportErrorOptions extends ErrorOptions {
+  readonly kind?: TransportErrorKind;
+}
+
+export class TransportError extends Error {
+  readonly kind: TransportErrorKind;
+  override readonly cause?: unknown;
+
+  constructor(message: string, opts: TransportErrorOptions = {}) {
+    super(message);
+
+    this.name = "TransportError";
+    this.kind = opts.kind ?? "receive";
+    this.cause = opts.cause;
+  }
 }
 
 export enum BackpressureState {
@@ -20,49 +65,3 @@ export type BackpressureSnapshot = Omit<BackpressureSignal, "state"> & {
   readonly state: keyof typeof BackpressureState;
   readonly updatedAt: number;
 };
-
-export interface TransportOptions {
-  // Nothing here, yet.
-}
-
-export interface TransportEvents {
-  "state-change": [next: TransportState, prev: TransportState];
-  error: [error: TransportError];
-}
-
-export interface Transport {
-  readonly state: TransportState;
-  send(packet: AnyPacket): Promise<void>;
-
-  /**
-   * Pull-based, the session drives consumption.
-   * Naturally applies backpressure. If the consumer stops pulling,
-   * the transport can signal the sender to slow down.
-   */
-  receive(): AsyncIterableIterator<AnyPacket>;
-  readonly backpressure: BackpressureSignal;
-
-  attach(): void;
-  dispose(): void;
-
-  on<K extends keyof TransportEvents>(event: K, listener: (...args: TransportEvents[K]) => void): () => void;
-}
-
-export type TransportErrorKind = "send" | "receive" | "terminate";
-
-export interface TransportErrorOptions extends ErrorOptions {
-  readonly kind?: TransportErrorKind;
-}
-
-export class TransportError extends Error {
-  readonly kind: TransportErrorKind;
-  override readonly cause?: unknown;
-
-  constructor(message: string, opts: TransportErrorOptions = {}) {
-    super(message);
-
-    this.name = "TransportError";
-    this.kind = opts.kind ?? "send";
-    this.cause = opts.cause;
-  }
-}

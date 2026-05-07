@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 
 import { BaseTransport } from "../base";
-import { TransportError, TransportState, type TransportOptions } from "..";
+import { TransportState, type TransportOptions } from "..";
 
 export interface ChildProcessTransportOptions extends TransportOptions {
   readonly child?: ChildProcess;
@@ -28,10 +28,6 @@ export class ChildProcessTransport extends BaseTransport {
   }
 
   attach(): void {
-    if (this.state !== TransportState.CLOSED) {
-      throw new TransportError("Cannot attach transport that is not in the closed state");
-    }
-
     this.port.on("message", this.onPortMessage);
     this.port.on("error", this.onPortError);
 
@@ -42,13 +38,9 @@ export class ChildProcessTransport extends BaseTransport {
       // Child side — detect parent disconnect.
       process.on("disconnect", this.onPortDisconnect);
     }
-
-    this.transition(TransportState.OPEN);
   }
 
   dispose(): void {
-    if (this.state === TransportState.CLOSED) return;
-
     this.port.off("message", this.onPortMessage);
     this.port.off("error", this.onPortError);
 
@@ -56,11 +48,6 @@ export class ChildProcessTransport extends BaseTransport {
       this.port.off("exit", this.onPortExit);
       this.port.off("disconnect", this.onPortDisconnect);
     } else process.off("disconnect", this.onPortDisconnect);
-
-    // Not sure if this part is reached.
-    this.queue.close();
-    this.transition(TransportState.CLOSED);
-    this.cleanup();
   }
 
   protected post(packet: unknown): void {
@@ -79,8 +66,8 @@ export class ChildProcessTransport extends BaseTransport {
 
   private readonly onPortExit = (code: number | null): void => {
     if (this.state === TransportState.CLOSED) return;
-    if (code === 0) return void this.dispose();
-    this.terminate(`Child process exited with code ${code}`);
+    if (code === 0) return void this.close();
+    this.terminate(`Child process exited with code ${code ?? -1}`);
   };
 
   private readonly onPortDisconnect = (): void => {

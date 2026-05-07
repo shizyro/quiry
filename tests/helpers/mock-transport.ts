@@ -1,6 +1,3 @@
-import EventEmitter from "node:events";
-
-import type { AnyPacket } from "~/interface/packets";
 import {
   type Transport,
   type TransportError,
@@ -9,10 +6,12 @@ import {
   BackpressureState,
 } from "~/core/transport";
 
-import { PacketQueue } from "~/core/transport/packet-queue";
+import { DeferredQueue } from "~/lib/queue";
+import type { AnyPacket } from "~/interface/packets";
 
 interface MockEvents {
-  "state-change": [next: TransportState, prev: TransportState];
+  open: [];
+  close: [reason?: string];
   backpressure: [signal: BackpressureSignal];
   error: [error: TransportError];
 }
@@ -26,15 +25,15 @@ interface MockEvents {
  * mirror the real `MessagePort`-based transport semantics: receivers can't
  * mutate the sender's copy, and non-cloneable values blow up the same way.
  *
- * The inbound buffer uses {@link PacketQueue} (generator-based iteration)
+ * The inbound buffer uses {@link DeferredQueue} (generator-based iteration)
  * rather than a raw `AsyncQueue`. That matters because the session creates
  * more than one iterator on `receive()` — one transient during handshake,
  * one durable for the router — and a raw `AsyncQueue` would close the
  * shared queue the moment the handshake iterator's `return()` was called.
  */
 export class MockTransport implements Transport {
-  readonly #emitter = new EventEmitter();
-  readonly #inbound = new PacketQueue();
+  readonly #listeners = new Map<keyof MockEvents, Set<(...args: unknown[]) => void>>();
+  readonly #inbound = new DeferredQueue<AnyPacket>();
 
   #peer: MockTransport | null = null;
   #state: TransportState = TransportState.CLOSED;
@@ -49,16 +48,16 @@ export class MockTransport implements Transport {
 
   private transition(next: TransportState): void {
     if (next === this.#state) return;
-    const prev = this.#state;
     this.#state = next;
-    this.#emitter.emit("state-change", next, prev);
+    if (next === TransportState.OPEN) this.emit("open");
+    if (next === TransportState.CLOSED) this.emit("close");
   }
 
-  attach(): void {
+  open(): void {
     this.transition(TransportState.OPEN);
   }
 
-  dispose(): void {
+  close(): void {
     if (this.#state === TransportState.CLOSED) return;
     this.transition(TransportState.CLOSED);
     this.#inbound.close();
@@ -82,7 +81,7 @@ export class MockTransport implements Transport {
 
   #deliver(packet: AnyPacket): void {
     // Defensive: a race with close() could still race the state check on
-    // the sending side. PacketQueue already drops silently on `#closed`,
+    // the sending side. DeferredQueue already drops silently on `#closed`,
     // so this is belt-and-suspenders.
     if (this.#state !== TransportState.OPEN) return;
     this.#inbound.enqueue(packet);
@@ -92,9 +91,14 @@ export class MockTransport implements Transport {
     return this.#inbound[Symbol.asyncIterator]();
   }
 
+  private emit<K extends keyof MockEvents>(event: K, ...args: MockEvents[K]): void {
+    this.#listeners.get(event)?.forEach((listener) => void listener(...args));
+  }
+
   on<K extends keyof MockEvents>(event: K, listener: (...args: MockEvents[K]) => void): () => void {
-    this.#emitter.on(event, listener as (...args: unknown[]) => void);
-    return () => this.#emitter.off(event, listener as (...args: unknown[]) => void);
+    const handle = listener as (...args: unknown[]) => void;
+    this.#listeners.set(event, new Set([...(this.#listeners.get(event) ?? []), handle]));
+    return () => this.#listeners.get(event)?.delete(handle);
   }
 
   /** @internal test helper — hooks a second transport as this one's counterpart. */

@@ -212,8 +212,8 @@ export class Session {
   readonly #controllers = new Map<CorrelationId, AbortController>();
 
   constructor(
-    private readonly transport: Transport,
-    private readonly inquiry: InquiryFunc = () => Promise.resolve(),
+    private readonly transport: Transport<AnyPacket>,
+    private readonly inquiry: InquiryFunc,
     config: SessionConfig = {},
     private readonly logger: Logger | null = null,
   ) {
@@ -290,11 +290,11 @@ export class Session {
     if (this.#state !== SessionState.CLOSED)
       throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot open session in the current state");
 
-    this.transport.on("state-change", (next) => next === "closed" && this.onTransportClose());
+    this.transport.on("close", this.onTransportClose);
     this.transport.on("error", this.onTransportError);
     // (error handlers are automatically disposed when the transport is closed)
 
-    this.transport.attach();
+    this.transport.open();
     // Router runs for the lifetime of the session and is stopped inside teardown.
     void this.conveyor.start(this.routeIncomingPacket.bind(this)).catch((error: unknown) => {
       // The router's source stream errored. Treat as fatal — we can't receive any more packets.
@@ -342,7 +342,7 @@ export class Session {
    */
   private async performDrain(
     initiator: "local" | "remote",
-    reason: string = "explicit",
+    reason: string = "drained",
     timeout: number = this.config.drainTimeout,
   ): Promise<void> {
     if (this.#state === SessionState.CLOSED) return;
@@ -352,7 +352,7 @@ export class Session {
     const timer = setTimeout(() => controller.abort(), timeout);
 
     // Short-circuit the drain the moment the transport dies under us.
-    this.transport.on("state-change", (next) => next === "closed" && controller.abort());
+    this.transport.on("close", () => controller.abort());
 
     try {
       // 1. Local initiator announces. Remote initiator stays silent —
@@ -475,7 +475,7 @@ export class Session {
     this.emitter.emit("terminate", reason);
 
     try {
-      this.transport.dispose();
+      this.transport.close(reason);
     } catch {}
   }
 
@@ -1722,31 +1722,35 @@ export class Session {
 
   // --------- INTERNALS: EVENT HANDLERS --------- //
 
-  private readonly onTransportClose = (): void => {
+  private readonly onTransportClose = (reason?: string): void => {
     if (this.#state === SessionState.CLOSED || this.#state === SessionState.DRAINING) return;
     // Cooperative close from the remote side, or our own close() propagating.
     // If we initiated the close (`draining`/`closed`), this is a no-op via #fail's idempotency.
-    this.logger?.warn("Transport closed unexpectedly");
+    this.logger?.warn("Transport closed", { reason });
   };
 
-  private readonly onTransportError = (error: TransportError): void => {
+  private readonly onTransportError = ({ message, kind, cause }: TransportError): void => {
     if (this.#state === SessionState.CLOSED || this.#state === SessionState.DRAINING) return;
+
     // Map TransportError.kind → WireStatus. Transport errors never escape the
     // transport unclassified — this is the only place that translation happens.
-    this.logger?.error("Transport error", {
-      error: (() => {
-        switch (error.kind) {
-          case "terminate":
-            return new QuiryError(WireStatus.PEER_GONE, error.message, { cause: error.cause });
-          case "receive":
-            return new QuiryError(WireStatus.DATA_LOSS, error.message, { cause: error.cause });
-          case "send":
-            return this.transport.state === TransportState.CLOSED
-              ? new QuiryError(WireStatus.UNAVAILABLE, error.message, { cause: error.cause })
-              : new QuiryError(WireStatus.DATA_LOSS, error.message, { cause: error.cause });
-        }
-      })(),
-    });
+    let error: QuiryError;
+    switch (kind) {
+      case "terminate":
+        error = new QuiryError(WireStatus.PEER_GONE, message, { cause });
+        break;
+      case "receive":
+        error = new QuiryError(WireStatus.DATA_LOSS, message, { cause });
+        break;
+      case "send":
+        error =
+          this.transport.state === TransportState.CLOSED
+            ? new QuiryError(WireStatus.UNAVAILABLE, message, { cause })
+            : new QuiryError(WireStatus.DATA_LOSS, message, { cause });
+        break;
+    }
+
+    this.logger?.error("Transport error", { error });
   };
 }
 

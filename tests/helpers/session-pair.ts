@@ -19,10 +19,10 @@ export async function openSessionPair(options: {
 }): Promise<SessionPair> {
   const [tA, tB] = pairTransports();
 
-  const producer = new Session(tA, options.producerInquiry, {
+  const producer = new Session(tA, options.producerInquiry ?? (() => Promise.resolve()), {
     ...options.config,
   });
-  const consumer = new Session(tB, options.consumerInquiry, {
+  const consumer = new Session(tB, options.consumerInquiry ?? (() => Promise.resolve()), {
     ...options.config,
   });
 

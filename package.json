@@ -2,7 +2,11 @@
   "name": "quiry",
   "version": "0.1.3",
   "description": "Transparent, type-safe IPC for Node worker threads and child processes.",
-  "keywords": ["ipc", "worker", "proxy"],
+  "keywords": [
+    "ipc",
+    "worker",
+    "proxy"
+  ],
   "author": {
     "name": "Shizuka Yashiro",
     "email": "shizuka.yashiro@gmail.com"
@@ -18,7 +22,11 @@
   },
   "type": "module",
   "sideEffects": false,
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -31,12 +39,17 @@
   },
   "scripts": {
     "build": "bunchee --sourcemap --target es2015",
-    "example": "bun examples/basic/index.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "fmt": "biome format --write",
+    "prepare": "husky"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.14",
     "@types/node": "^25.6.0",
     "bunchee": "^6.10.0",
+    "husky": "^9.1.7",
     "typescript": "^5",
     "vitest": "^4.1.5"
   },

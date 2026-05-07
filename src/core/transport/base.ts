@@ -1,20 +1,18 @@
-import EventEmitter from "node:events";
-import type { AnyPacket } from "../../interface/packets";
-
 import {
-  TransportError,
   TransportState,
+  TransportError,
   type Transport,
   type TransportEvents,
   type BackpressureSignal,
   BackpressureState,
 } from ".";
 
-import { PacketQueue } from "./packet-queue";
-import { isWirePacket } from "../../lib/helpers";
+import { DeferredQueue } from "../../lib/queue";
+import { isWirePacket, collectTransferables } from "../../lib/helpers";
+import type { AnyPacket } from "../../interface/packets";
 
-const BACKPRESSURE_HIGH = 100; // packets
-const BACKPRESSURE_CRITICAL = 500;
+const BACKPRESSURE_HIGH: number = 100; // packets
+const BACKPRESSURE_CRITICAL: number = 500;
 
 /**
  * Base transport class for most transport implementations.
@@ -22,9 +20,9 @@ const BACKPRESSURE_CRITICAL = 500;
  * Provides a common interface for sending and receiving packets,
  * as well as managing the transport state and backpressure.
  */
-export abstract class BaseTransport implements Transport {
-  private readonly emitter = new EventEmitter<TransportEvents>();
-  protected readonly queue = new PacketQueue(16);
+export abstract class BaseTransport implements Transport<AnyPacket> {
+  protected readonly queue = new DeferredQueue<AnyPacket>(16);
+  private readonly listeners = new Map<keyof TransportEvents, Set<(...args: unknown[]) => void>>();
 
   #state: TransportState = TransportState.CLOSED;
   #depth: number = 0;
@@ -33,11 +31,23 @@ export abstract class BaseTransport implements Transport {
     return this.#state;
   }
 
-  protected transition(next: TransportState): void {
-    if (next === this.#state) return;
-    const prev = this.#state;
-    this.#state = next;
-    this.emitter.emit("state-change", next, prev);
+  open(): void {
+    if (this.state !== TransportState.CLOSED)
+      throw new TransportError("Cannot attach transport that is not in the closed state");
+    this.attach();
+
+    this.#state = TransportState.OPEN;
+    this.emit("open");
+  }
+
+  close(reason?: string): void {
+    if (this.state === TransportState.CLOSED) return;
+    this.dispose();
+
+    this.queue.close();
+    this.#state = TransportState.CLOSED;
+    this.emit("close", reason ?? "explicit");
+    this.cleanup();
   }
 
   async send(packet: AnyPacket): Promise<void> {
@@ -57,6 +67,16 @@ export abstract class BaseTransport implements Transport {
     }
   }
 
+  private emit<K extends keyof TransportEvents>(event: K, ...args: TransportEvents[K]): void {
+    this.listeners.get(event)?.forEach((listener) => void listener(...args));
+  }
+
+  on<K extends keyof TransportEvents>(event: K, listener: (...args: TransportEvents[K]) => void): () => void {
+    const handle = listener as (...args: unknown[]) => void;
+    this.listeners.set(event, new Set([...(this.listeners.get(event) ?? []), handle]));
+    return () => this.listeners.get(event)?.delete(handle);
+  }
+
   /**
    * Subclasses call this to post a message on their specific port type.
    */
@@ -74,24 +94,20 @@ export abstract class BaseTransport implements Transport {
    * Non-packets are dropped (no throw) so a malformed message cannot tear down the transport.
    */
   protected read(value: unknown): void {
-    if (!isWirePacket(value)) {
-      //// throw new TransportError("Invalid wire packet", { kind: "receive", cause: value });
-      return;
-    }
-    this.queue.enqueue(value);
+    if (isWirePacket(value)) this.queue.enqueue(value);
   }
 
-  protected terminate(reason: TransportError | string, cause?: unknown): void {
-    const error =
-      reason instanceof TransportError ? reason : new TransportError(reason, { kind: "terminate", cause });
-    this.emitter.emit("error", error);
+  protected terminate(message: string, cause?: unknown): void {
+    this.emit("error", new TransportError(message, { kind: "terminate", cause }));
+
     this.queue.close();
-    this.transition(TransportState.CLOSED);
+    this.#state = TransportState.CLOSED;
+    this.emit("close", message);
     this.cleanup();
   }
 
   protected cleanup(): void {
-    this.emitter.removeAllListeners();
+    this.listeners.clear();
   }
 
   /**
@@ -109,27 +125,4 @@ export abstract class BaseTransport implements Transport {
       depth: this.#depth,
     };
   }
-
-  on<K extends keyof TransportEvents>(event: K, listener: (...args: TransportEvents[K]) => void): () => void {
-    this.emitter.on(event, listener as (...args: unknown[]) => void);
-    return () => this.emitter.off(event, listener as (...args: unknown[]) => void);
-  }
-}
-
-/**
- * Recursively walks a packet to find array buffers and message ports that
- * should be transferred (zero-copy) rather than cloned.
- */
-function collectTransferables(value: unknown, seen = new Set<object>()): Transferable[] {
-  if (value === null || typeof value !== "object") return [];
-  if (seen.has(value as object)) return [];
-  seen.add(value as object);
-
-  if (value instanceof ArrayBuffer) return [value];
-  if (value instanceof MessagePort) return [value];
-
-  // Typed arrays and their underlying array buffers
-  if (ArrayBuffer.isView(value)) return value.buffer instanceof ArrayBuffer ? [value.buffer] : [];
-
-  return Object.values(value).flatMap((item) => collectTransferables(item, seen));
 }

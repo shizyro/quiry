@@ -2,7 +2,7 @@ import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import type { MessagePort, Transferable } from "node:worker_threads";
 
 import { BaseTransport } from "../base";
-import { TransportError, TransportState, type TransportOptions } from "..";
+import { TransportState, type TransportOptions } from "..";
 
 export interface WorkerThreadsTransportOptions extends TransportOptions {
   readonly worker?: Worker;
@@ -30,34 +30,21 @@ export class WorkerThreadsTransport extends BaseTransport {
   }
 
   attach(): void {
-    if (this.state !== TransportState.CLOSED) {
-      throw new TransportError("Cannot attach transport that is not in the closed state");
-    }
-
     this.port.on("message", this.onPortMessage);
     this.port.on("error", this.onPortError);
 
     if (this.port instanceof Worker) {
       this.port.on("exit", this.onPortExit);
     } else this.port.on("close", this.onPortClose);
-
-    this.transition(TransportState.OPEN);
   }
 
   dispose(): void {
-    if (this.state === TransportState.CLOSED) return;
-
-    // Remove all listeners
     this.port.off("message", this.onPortMessage);
     this.port.off("error", this.onPortError);
 
     if (this.port instanceof Worker) {
       this.port.off("exit", this.onPortExit);
     } else this.port.off("close", this.onPortClose);
-
-    this.queue.close();
-    this.transition(TransportState.CLOSED);
-    this.cleanup();
   }
 
   protected post(packet: unknown, transferables: Transferable[]): void {
@@ -81,7 +68,7 @@ export class WorkerThreadsTransport extends BaseTransport {
     if (this.state === TransportState.CLOSED) return;
     // Code 0 is a clean, cooperative shutdown (e.g. `process.exit(0)`); anything else
     // is abnormal and must be surfaced to the session as `terminated`.
-    if (code === 0) return void this.dispose();
+    if (code === 0) return void this.close();
     this.terminate(`Worker thread exited with code ${code}`);
   };
 

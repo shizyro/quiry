@@ -10,6 +10,9 @@
     "declaration": true,
     "outDir": "./dist"
   },
-  "include": ["./src/**/*.ts", "./examples/**/*.ts", "./tests/**/*.ts"],
-  "exclude": ["./node_modules", "./dist"]
+  "include": ["./src/**/*.ts", "./examples/**/*.ts"],
+  "exclude": ["./node_modules", "./dist"],
+  "references": [
+    { "path": "./tests" }
+  ]
 }

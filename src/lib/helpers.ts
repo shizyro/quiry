@@ -62,3 +62,21 @@ export function isWirePacket(value: unknown): value is AnyPacket {
     "payload" in v
   );
 }
+
+/**
+ * Recursively walks a packet to find array buffers and message ports that
+ * should be transferred (zero-copy) rather than cloned.
+ */
+export function collectTransferables(value: unknown, seen = new Set<object>()): Transferable[] {
+  if (value === null || typeof value !== "object") return [];
+  if (seen.has(value as object)) return [];
+  seen.add(value as object);
+
+  if (value instanceof ArrayBuffer) return [value];
+  if (value instanceof MessagePort) return [value];
+
+  // Typed arrays and their underlying array buffers
+  if (ArrayBuffer.isView(value)) return value.buffer instanceof ArrayBuffer ? [value.buffer] : [];
+
+  return Object.values(value).flatMap((item) => collectTransferables(item, seen));
+}
