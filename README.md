@@ -173,4 +173,4 @@ Transferables and `SharedArrayBuffer` are not supported yet. That direction is p
 Single-author project, pre-1.0. The internal protocol shape is mostly stable. The public API surface still has open decisions, and is not settled on.
 > This project is under active development. Many edge cases have not been tested. If you encounter any issues, please [open an issue](https://github.com/shizyro/quiry/issues).
 
-MIT License
+All contents of this repository and its history are licensed under Apache License 2.0.
