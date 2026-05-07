@@ -2,6 +2,7 @@ import EventEmitter from "node:events";
 import Quiry, { WorkerThreadsTransport } from "@/";
 
 import { isMainThread } from "node:worker_threads";
+import { openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 
 class GreeterService {
@@ -40,11 +41,11 @@ function isPrime(n: number): boolean {
   return true;
 }
 
-type ExampleEvents = { test: [query?: string] };
+type ExampleEvents = { foo: [query?: string]; bar: [] };
 class EventService {
   readonly emitter = new EventEmitter();
   get eventNames(): string[] {
-    return this.emitter.eventNames().map(String);
+    return ["foo", "bar"];
   }
 
   on<TEventName extends keyof ExampleEvents>(
@@ -52,6 +53,7 @@ class EventService {
     listener: (...args: ExampleEvents[TEventName]) => void,
   ) {
     this.emitter.on(event, listener);
+    return () => this.emitter.off(event, listener);
   }
 
   emit<TEventName extends keyof ExampleEvents>(
@@ -62,19 +64,38 @@ class EventService {
   }
 }
 
+class FileService {
+  open(path: string) {
+    const handle = openSync(join(__dirname, path), "r");
+    return {
+      read: (n: number) => {
+        const buffer = Buffer.alloc(n);
+        const bytesRead = readSync(handle, buffer, 0, n, null);
+        // (must be converted to string to survive serialization)
+        return buffer.subarray(0, bytesRead).toString();
+      },
+      close: () => {
+        closeSync(handle);
+      },
+    };
+  }
+}
+
 export type ExampleRegistry = {
   greeter: GreeterService;
   math: MathService;
   events: EventService;
+  file: FileService;
   timer: {
     delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T>;
   };
 };
 
 async function bootstrap() {
-  Quiry.expose("greeter", new GreeterService());
   Quiry.expose("math", new MathService());
+  Quiry.expose("greeter", new GreeterService());
   Quiry.expose("events", new EventService());
+  Quiry.expose("file", new FileService());
   Quiry.expose("timer", {
     async delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T> {
       await new Promise((resolve) => setTimeout(resolve, ms));
