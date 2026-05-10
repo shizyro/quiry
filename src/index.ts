@@ -1,11 +1,14 @@
-import EventEmitter from "node:events";
 import { fork as NJSFork, type ForkOptions as NJSForkOptions } from "node:child_process";
 import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 
-import { Normalized, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
-import { WireStatus, type RequestControl } from "./interface/protocol";
+import { EventEmitter } from "node:events";
+
+import type { AnyPacket } from "./interface/packets";
 import type { ServiceRegistry, ServiceImpl } from "./interface/types";
-import type { RemotablePropertyKeys, RemoteServiceDefinition } from "./interface/transformers";
+import type { RemoteServiceDefinition, RemotablePropertyKeys } from "./interface/transformers";
+import { WireStatus, type RequestControl } from "./interface/protocol";
+
+import { Session, type InquiryFunc, type InquiryRequest, type CallbackHandle } from "./core/session";
 
 import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
@@ -19,12 +22,6 @@ import { randomBytes } from "node:crypto";
 export interface GlobalServiceRegistry extends Record<Quiry.PeerIdentifier, ServiceRegistry> {}
 
 namespace Quiry {
-  export type CallbackHandle<T extends Function> = T & {
-    release(): boolean;
-    [Symbol.dispose](): void;
-    [Symbol.asyncDispose](): void;
-  };
-
   export type PeerIdentifier = string | symbol | number;
 
   export class PeerConnection<
@@ -71,25 +68,10 @@ namespace Quiry {
     callback<T extends Function>(fn: T): CallbackHandle<T> {
       if (typeof fn !== "function")
         throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
-      if (Normalized in fn)
+      if (Session.serialize in fn)
         throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Function is already bound as a callback handle");
 
-      const stub = this.session.bind(fn);
-      const release = (): boolean => this.session.release(stub.id);
-
-      // The wrapper still satisfies `typeof === "function"`, so passing it as
-      // a callback argument flows through `normalize()` -> `[Normalized]` -> the
-      // existing stub, just like a decorated function would.
-      const handle = (...args: unknown[]): unknown =>
-        (fn as unknown as (...a: unknown[]) => unknown)(...args);
-      Object.defineProperties(handle, {
-        release: { value: release, enumerable: false },
-        [Symbol.dispose]: { value: release, enumerable: false },
-        [Symbol.asyncDispose]: { value: release, enumerable: false },
-        [Normalized]: { value: stub, enumerable: false },
-      });
-
-      return handle as unknown as CallbackHandle<T>;
+      return this.session.proxy(fn);
     }
 
     /** Resolves to the value of a remote property. */
@@ -179,14 +161,17 @@ namespace Quiry {
   export function attach<
     TIdentifier extends PeerIdentifier = PeerIdentifier,
     TServices extends ServiceRegistry = GlobalServiceRegistry[TIdentifier],
-  >(transport: Transport, options?: AttachOptions<TIdentifier>): PeerConnection<TIdentifier, TServices>;
+  >(
+    transport: Transport<AnyPacket>,
+    options?: AttachOptions<TIdentifier>,
+  ): PeerConnection<TIdentifier, TServices>;
 
   export function attach<TServices extends ServiceRegistry>(
-    transport: Transport,
+    transport: Transport<AnyPacket>,
     options?: AttachOptions,
   ): PeerConnection<PeerIdentifier, TServices>;
 
-  export function attach(transport: Transport, options: AttachOptions = {}): PeerConnection {
+  export function attach(transport: Transport<AnyPacket>, options: AttachOptions = {}): PeerConnection {
     const identifier = options.identifier ?? randomBytes(4).toString("hex");
     if (peers.has(identifier)) {
       throw new QuiryError(

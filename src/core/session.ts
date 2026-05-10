@@ -1,79 +1,22 @@
-import EventEmitter from "node:events";
-
-import { TransportState, type Transport, type BackpressureSignal, type TransportError } from "./transport";
+import * as Packets from "../interface/packets";
 import { WireKind, WireStatus, type RequestControl, type RetryPolicy } from "../interface/protocol";
 import type { CorrelationId, InvocationId, CallbackId } from "../interface/types";
 
-import {
-  CallbackMessageType,
-  RequestMessageType,
-  ResponseMessageType,
-  SystemMessageType,
-  type AbortRequestPacket,
-  type AnyCallbackPacket,
-  type AnyPacket,
-  type AnyRequestPacket,
-  type AnyResponsePacket,
-  type AnySystemPacket,
-  type AnyTypedPacket,
-  type CallbackInvokePacket,
-  type CallbackReleasePacket,
-  type CallbackReturnPacket,
-  type CallRequestPacket,
-  type CancelRequestPacket,
-  type GetRequestPacket,
-  type PacketByKind,
-  type StreamResponsePacket,
-  type SystemDrainAckPacket,
-  type SystemDrainPacket,
-  type ValueResponsePacket,
-} from "../interface/packets";
+import { EventEmitter } from "node:events";
 
 import { Router } from "../lib/router";
 import { AsyncQueue } from "../lib/queue";
-import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "../shared/errors";
+import { InFlightTracker } from "../lib/tracker";
 
-import { CallbackRegistry, CallbackScope, isCallbackStub, stub, type Callback } from "../lib/callbacks";
+import { TransportState, type Transport, type BackpressureSignal, type TransportError } from "./transport";
+
+import { CallbackRegistry, CallbackScope, isCallbackStub, type Callback } from "../lib/callbacks";
+import { QuiryError, isRetryableStatus, fromWireError, toWireError } from "../shared/errors";
 
 import { isSerializable, isAnyIterableIterator } from "../lib/helpers";
 import { retryable, timeout, abortable } from "../lib/utils";
-import { InFlightTracker } from "../lib/tracker";
 
-import { nanoid } from "nanoid";
-
-export type OmitStandardFields<T> = Omit<T, "id" | "from" | "timestamp">;
-
-/**
- * A symbol used to mark a property to substitute the entire object
- * with before sending it to the remote side.
- *
- * Might want to think of a better name for this.
- */
-export const Normalized: unique symbol = Symbol("quiry.normalized");
-
-/** Unwraps `[Normalized]` aliases; preserves cycles for a later `isSerializable` rejection instead of blowing the stack. */
-function normalize<T = unknown>(value: T, seen?: WeakSet<object>): T {
-  if (Object(value) !== value || value === null) return value;
-  if (Normalized in (value as object)) return (value as unknown as { [Normalized]: T })[Normalized];
-  if (typeof value === "object") {
-    // Cycle protection: if we've already seen this node on the current
-    // walk, return it unchanged. The cycle will still be present in the
-    // returned graph, which is exactly what `isSerializable` relies on
-    // to reject it downstream with INVALID_ARGUMENT (rather than the
-    // walk blowing the stack with a RangeError).
-    seen ??= new WeakSet();
-    if (seen.has(value as object)) return value;
-    seen.add(value as object);
-
-    if (Array.isArray(value)) return value.map((v) => normalize(v, seen)) as T;
-    const result: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as object)) {
-      result[key] = normalize(val, seen);
-    }
-    return result as T;
-  }
-  return value;
-}
+import { randomBytes } from "node:crypto";
 
 export type InquiryFunc = (
   request: InquiryRequest,
@@ -128,6 +71,45 @@ interface PendingCallbackInvocation<T = unknown> {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * A wrapper around a callback function that provides a
+ * release method and a dispose symbol for explicit resource management.
+ */
+export type CallbackHandle<T extends Function> = T & {
+  id: CallbackId;
+  release(): boolean;
+  [Symbol.dispose](): void;
+};
+
+interface InteractiveRouter {
+  /**
+   * Awaits the next inbound packet matching `predicate` via the session {@link Router}.
+   * @throws {@link QuiryError} `DEADLINE_EXCEEDED` on timeout, `ABORTED` on signal — not the raw `Error` strings from {@link Router.wait}.
+   */
+  wait<K extends Packets.AnyPacket["kind"], P extends Packets.PacketByKind<K>>(
+    kind: K,
+    predicate?: (packet: Packets.PacketByKind<K>) => packet is P,
+    options?: { timeout?: number; signal?: AbortSignal },
+  ): Promise<P>;
+
+  /** Passive, persistent listener for a specific packet kind. Matching packets are still forwarded to other consumers. Returns unsubscribe. */
+  listen<K extends Packets.AnyPacket["kind"], P extends Packets.PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: Packets.PacketByKind<K>) => packet is P,
+    handler: (packet: P) => void,
+  ): Unsubscribe;
+
+  /**
+   * Active interceptor for a specific packet kind. When `handler` returns `true` the packet
+   * is consumed and not forwarded to the default handler. Returns unsubscribe.
+   */
+  intercept<K extends Packets.AnyPacket["kind"], P extends Packets.PacketByKind<K>>(
+    kind: K,
+    predicate: (packet: Packets.PacketByKind<K>) => packet is P,
+    handler: (packet: P) => boolean,
+  ): Unsubscribe;
+}
+
 export enum SessionState {
   OPEN = "open",
   DRAINING = "draining",
@@ -144,27 +126,13 @@ export interface SessionConfig {
 
 export interface SessionEvents {
   "state-change": [next: SessionState, prev: SessionState];
+  /**
+   * Emitted when a callback is released by the local or remote side.
+   * This is useful for debugging and observability.
+   */
+  "callback-released": [id: CallbackId];
   terminate: [reason?: string];
   error: [error: Error];
-}
-
-export interface InteractiveRouter {
-  /** Passive, persistent listener for a specific packet kind. Matching packets are still forwarded to other consumers. Returns unsubscribe. */
-  listen<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate: (packet: PacketByKind<K>) => packet is R,
-    handler: (packet: R) => void,
-  ): Unsubscribe;
-
-  /**
-   * Active interceptor for a specific packet kind. When `handler` returns `true` the packet
-   * is consumed and not forwarded to the default handler. Returns unsubscribe.
-   */
-  intercept<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate: (packet: PacketByKind<K>) => packet is R,
-    handler: (packet: R) => boolean,
-  ): Unsubscribe;
 }
 
 /**
@@ -172,22 +140,66 @@ export interface InteractiveRouter {
  * Incoming routing runs on a {@link Router}; unhandled async errors in packet handlers shut the session down.
  */
 export class Session {
+  /**
+   * A symbol used to mark a property to substitute the entire object
+   * with before sending it to the remote side.
+   *
+   * Might want to think of a better name for this.
+   */
+  static readonly serialize: unique symbol = Symbol("quiry.serialize");
+
+  /**
+   * Unwraps `[Session.serialize]` aliases; preserves cycles for
+   * a later `isSerializable` rejection instead of blowing the stack.
+   */
+  static unwrapSerialized<T = unknown>(value: T, seen?: WeakSet<object>): T {
+    if (Object(value) !== value || value === null) return value;
+    if (Session.serialize in (value as object))
+      return (value as unknown as { [Session.serialize]: T })[Session.serialize];
+    if (typeof value === "object") {
+      // Cycle protection: if we've already seen this node on the current
+      // walk, return it unchanged. The cycle will still be present in the
+      // returned graph, which is exactly what `isSerializable` relies on
+      // to reject it downstream with INVALID_ARGUMENT (rather than the
+      // walk blowing the stack with a RangeError).
+      seen ??= new WeakSet();
+      if (seen.has(value as object)) return value;
+      seen.add(value as object);
+
+      if (Array.isArray(value)) return value.map((v) => Session.unwrapSerialized(v, seen)) as T;
+      const result: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(value as object)) {
+        result[key] = Session.unwrapSerialized(val, seen);
+      }
+      return result as T;
+    }
+    return value;
+  }
+
   private readonly emitter = new EventEmitter();
   #state: SessionState = SessionState.CLOSED;
 
   private readonly config: DeepRequired<SessionConfig>;
-  private readonly conveyor: Router<AnyPacket>;
+  private readonly router: Router<Packets.AnyPacket>;
 
   /** A wrapper around the internal router to provide a more convenient API. */
-  get router(): InteractiveRouter {
+  get channel(): InteractiveRouter {
     return {
+      wait: (kind, predicate, options) =>
+        this.router
+          .wait<any>((packet) => packet.kind === kind && (predicate ? predicate(packet) : true), options)
+          .catch((cause: unknown) => {
+            if (cause instanceof Error && cause.message.includes("Timeout"))
+              throw new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for packet", { cause });
+            throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause });
+          }),
       listen: (kind, predicate, handler) =>
-        this.conveyor.listen(
+        this.router.listen(
           (packet) => packet.kind === kind && (predicate ? predicate(packet) : true),
           handler,
         ),
       intercept: (kind, predicate, handler) =>
-        this.conveyor.intercept(
+        this.router.intercept(
           (packet) => packet.kind === kind && (predicate ? predicate(packet) : true),
           handler,
         ),
@@ -207,17 +219,17 @@ export class Session {
   readonly #inflight_invocations = new Map<CorrelationId, number>();
   readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
-  readonly #finalization_registry: FinalizationRegistry<CallbackId>;
 
-  readonly #controllers = new Map<CorrelationId, AbortController>();
+  private readonly finalization: FinalizationRegistry<CallbackId>;
+  private readonly controllers = new Map<CorrelationId, AbortController>();
 
   constructor(
-    private readonly transport: Transport<AnyPacket>,
+    private readonly transport: Transport<Packets.AnyPacket>,
     private readonly inquiry: InquiryFunc,
     config: SessionConfig = {},
     private readonly logger: Logger | null = null,
   ) {
-    this.conveyor = new Router(this.transport.receive());
+    this.router = new Router(this.transport.receive());
     this.config = {
       defaultTimeout: config.defaultTimeout ?? 10_000,
       drainTimeout: config.drainTimeout ?? 5000,
@@ -229,30 +241,61 @@ export class Session {
       },
     };
 
-    this.#finalization_registry = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
+    this.finalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
       if (this.#state === SessionState.CLOSED) return;
       this.logger?.debug(`Automatically releasing garbage collected callback ${clip(id)}`);
-      void this.send({
+      const released = this.callbacks.release(id);
+      if (released) {
+        this.emitter.emit("callback-released", id);
+        return;
+      }
+
+      // No local release; send a RELEASE packet to the peer.
+      void this.send<Packets.CallbackReleasePacket>({
         kind: WireKind.CALLBACK,
-        type: CallbackMessageType.RELEASE,
+        type: Packets.CallbackMessageType.RELEASE,
         payload: { ref: null, callbacks: [id], gc: true },
-      } satisfies OmitStandardFields<CallbackReleasePacket>).catch(() => {});
+      }).catch(() => {});
     });
   }
 
-  /** Fills `id`, `from`, `timestamp`, then {@link Session.forward}. */
-  send(packet: Omit<AnyTypedPacket, "id" | "from" | "timestamp">): Promise<CorrelationId> {
-    return this.forward({
-      id: nanoid() as CorrelationId,
-      timestamp: Date.now(),
-      ...packet,
-    } as AnyPacket);
+  /** Generates a random correlation id. */
+  static correlate(): CorrelationId {
+    return randomBytes(4).toString("hex") as CorrelationId;
   }
 
-  /**
-   * Sends on the transport when not `closed`; otherwise no-ops (returns id) so drain/teardown can still complete.
-   */
-  protected async forward(packet: AnyPacket): Promise<CorrelationId> {
+  /** Fills source and timestamp, then {@link Session.forward}. */
+  send<P extends Packets.AnyTypedPacket>(packet: Omit<P, "id" | "timestamp">): Promise<CorrelationId> {
+    return this.forward({
+      id: Session.correlate(),
+      timestamp: Date.now(),
+      ...packet,
+    } as P);
+  }
+
+  /** Proxies a function to the session and returns a callback handle. */
+  proxy<T extends Function>(fn: T): CallbackHandle<T> {
+    const callback = this.callbacks.bind(fn);
+    const release = (): boolean => this.callbacks.release(callback.id);
+
+    // The wrapper still satisfies `typeof === "function"`, so passing it as
+    // a callback argument flows through serialization to the existing stub,
+    // just like a decorated function would.
+    const handle = (...args: unknown[]): unknown => (fn as unknown as (...a: unknown[]) => unknown)(...args);
+    Object.defineProperties(handle, {
+      id: { value: callback.id, enumerable: false, writable: false },
+      release: { value: release, enumerable: false },
+      [Symbol.dispose]: { value: release, enumerable: false },
+      [Session.serialize]: { value: callback, enumerable: false },
+    });
+
+    this.finalization.register(handle, callback.id);
+    this.logger?.debug(`Created callback proxy ${clip(callback.id)}`);
+    return handle as unknown as CallbackHandle<T>;
+  }
+
+  /** Posts packet to the transport. */
+  protected async forward<P extends Packets.AnyPacket>(packet: P): Promise<CorrelationId> {
     // Silently drop sends on a closed session. This can happen during teardown
     // when cleanup code attempts to send RELEASE after the transport is gone.
     if (this.#state !== SessionState.CLOSED) {
@@ -296,7 +339,7 @@ export class Session {
 
     this.transport.open();
     // Router runs for the lifetime of the session and is stopped inside teardown.
-    void this.conveyor.start(this.routeIncomingPacket.bind(this)).catch((error: unknown) => {
+    void this.router.start(this.routeIncomingPacket.bind(this)).catch((error: unknown) => {
       // The router's source stream errored. Treat as fatal — we can't receive any more packets.
       this.logger?.error("Router source stream errored", { error: QuiryError.from(error) });
       this.terminate();
@@ -359,11 +402,11 @@ export class Session {
       //    its peer has already sent DRAIN and is waiting for our
       //    terminal ACK, which we'll send in step 3 after we quiesce.
       if (initiator === "local") {
-        await this.send({
+        await this.send<Packets.SystemDrainPacket>({
           kind: WireKind.SYSTEM,
-          type: SystemMessageType.DRAIN,
+          type: Packets.SystemMessageType.DRAIN,
           payload: { reason, timeout },
-        } satisfies OmitStandardFields<SystemDrainPacket>).catch(() => null);
+        }).catch(() => null);
       }
 
       // 2. Proactively terminate work that can run past the deadline:
@@ -388,11 +431,11 @@ export class Session {
         );
 
         // Tell the producer to stop emitting.
-        void this.send({
+        void this.send<Packets.CancelRequestPacket>({
           kind: WireKind.REQUEST,
-          type: RequestMessageType.CANCEL,
+          type: Packets.RequestMessageType.CANCEL,
           payload: { ref },
-        } satisfies OmitStandardFields<CancelRequestPacket>).catch(() => null);
+        }).catch(() => null);
       }
 
       // 3. Quiesce and ACK in parallel with waiting for the peer's ACK.
@@ -402,14 +445,14 @@ export class Session {
       //    Both tasks share the same `drainTimeout` via `controller`.
       const quiesce = Promise.all([this.inbound.idle(), this.outbound.idle()]).then(async () => {
         if (this.#peer_drain_ref) {
-          await this.send({
+          await this.send<Packets.SystemDrainAckPacket>({
             kind: WireKind.SYSTEM,
-            type: SystemMessageType.DRAIN_ACK,
+            type: Packets.SystemMessageType.DRAIN_ACK,
             payload: {
               ref: this.#peer_drain_ref,
               uptime: process.uptime(),
             },
-          } satisfies OmitStandardFields<SystemDrainAckPacket>).catch(() => null);
+          }).catch(() => null);
         }
         // Flip the flag *after* the send so the DRAIN handler
         // doesn't fire a duplicate ACK during the await window.
@@ -420,9 +463,9 @@ export class Session {
       // remote-initiated drains are one-way from the peer's POV.
       const peerAck =
         initiator === "local"
-          ? this.conveyor
-              .wait<SystemDrainAckPacket>(
-                (p) => p.kind === WireKind.SYSTEM && p.type === SystemMessageType.DRAIN_ACK,
+          ? this.router
+              .wait<Packets.SystemDrainAckPacket>(
+                (p) => p.kind === WireKind.SYSTEM && p.type === Packets.SystemMessageType.DRAIN_ACK,
                 { signal: controller.signal },
               )
               .then(({ id }) => this.logger?.debug(`Received DRAIN_ACK (${clip(id)}) from remote peer`))
@@ -458,7 +501,7 @@ export class Session {
 
     // Stop the router; any waiters still pending get rejected with
     // "Stream closed" via the router's own cleanup.
-    this.conveyor.stop();
+    this.router.stop();
 
     // Reject all pending calls
     this.rejectAllPending(new QuiryError(WireStatus.ABORTED, "Session draining"));
@@ -486,14 +529,14 @@ export class Session {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
 
-    const correlation = nanoid() as CorrelationId;
+    const correlation = Session.correlate();
     const body = {
       id: correlation,
       kind: WireKind.REQUEST,
-      type: RequestMessageType.GET,
+      type: Packets.RequestMessageType.GET,
       timestamp: Date.now(),
       payload: { service, property },
-    } satisfies GetRequestPacket;
+    } satisfies Packets.GetRequestPacket;
 
     return new Promise((resolve, reject) => {
       const cleanup = (): void => {
@@ -544,8 +587,8 @@ export class Session {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open", { traceId: control?.traceId });
     }
 
-    const correlation = nanoid() as CorrelationId;
-    const substitutes = this.callbacks.substitute(normalize(args), correlation);
+    const correlation = Session.correlate();
+    const substitutes = this.callbacks.substitute(Session.unwrapSerialized(args), correlation);
     // Ensure arguments can be cloned through port
     if (!isSerializable(substitutes))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
@@ -562,7 +605,7 @@ export class Session {
     const body = {
       id: correlation,
       kind: WireKind.REQUEST,
-      type: RequestMessageType.CALL,
+      type: Packets.RequestMessageType.CALL,
       timestamp: Date.now(),
       payload: {
         service,
@@ -570,7 +613,7 @@ export class Session {
         args: substitutes,
         control: { ...control, abortable: signal instanceof AbortSignal },
       },
-    } satisfies CallRequestPacket;
+    } satisfies Packets.CallRequestPacket;
 
     const timeout = control?.timeout ?? this.config.defaultTimeout;
     const context = { correlationId: correlation, traceId: control?.traceId };
@@ -628,11 +671,11 @@ export class Session {
 
           if (signal) {
             abortHandler = () => {
-              void this.send({
+              void this.send<Packets.AbortRequestPacket>({
                 kind: WireKind.REQUEST,
-                type: RequestMessageType.ABORT,
+                type: Packets.RequestMessageType.ABORT,
                 payload: { ref: body.id },
-              } satisfies OmitStandardFields<AbortRequestPacket>).catch(() => null);
+              }).catch(() => null);
               fail(new QuiryError(WireStatus.ABORTED, "Request operation cancelled", context));
             };
 
@@ -668,7 +711,7 @@ export class Session {
     method: string,
     args: ReadonlyArray<unknown>,
     control?: Omit<RequestControl, "abortable">,
-    signal?: AbortSignal, // TODO: umm... decide on this
+    signal?: AbortSignal,
   ): AsyncIterableIterator<unknown> {
     if (this.#state !== SessionState.OPEN) {
       const q = new AsyncQueue<unknown>();
@@ -676,8 +719,8 @@ export class Session {
       return q;
     }
 
-    const correlation = nanoid() as CorrelationId;
-    const substitutes = this.callbacks.substitute(normalize(args), correlation);
+    const correlation = Session.correlate();
+    const substitutes = this.callbacks.substitute(Session.unwrapSerialized(args), correlation);
     // Ensure arguments can be cloned through port
     if (!isSerializable(substitutes))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
@@ -697,22 +740,35 @@ export class Session {
     );
 
     const entry: PendingStreamRequest = { kind: "stream", queue, credit, seq: 0 };
+    const cancel = (error: Error): void => {
+      clearTimeout(entry.timer);
+      this.#pending_requests.delete(correlation);
+      this.outbound.exit();
+      queue.fail(error);
+
+      void this.send<Packets.CancelRequestPacket>({
+        kind: WireKind.REQUEST,
+        type: Packets.RequestMessageType.CANCEL,
+        payload: { ref: correlation },
+      }).catch(() => {
+        // observable; deadline already fired locally
+      });
+    };
+
     if (control?.timeout) {
       entry.timer = setTimeout(() => {
         this.logger?.debug(`Stream ${clip(correlation)} timed out after ${control.timeout}ms`);
-        this.#pending_requests.delete(correlation);
-        this.outbound.exit();
-        queue.fail(new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Stream request timed out", context));
-
-        // Best-effort cancel on the producer side so it stops emitting.
-        void this.send({
-          kind: WireKind.REQUEST,
-          type: RequestMessageType.CANCEL,
-          payload: { ref: correlation },
-        } satisfies OmitStandardFields<CancelRequestPacket>).catch(() => {
-          // observable; deadline already fired locally
-        });
+        cancel(new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Stream request timed out", context));
       }, control.timeout);
+    }
+
+    if (signal) {
+      const abortHandler = () => {
+        cancel(new QuiryError(WireStatus.ABORTED, "Stream request cancelled", context));
+        signal.removeEventListener("abort", abortHandler);
+      };
+      if (signal.aborted) abortHandler();
+      signal.addEventListener("abort", abortHandler, { once: true });
     }
 
     this.#pending_requests.set(correlation, entry);
@@ -726,16 +782,16 @@ export class Session {
         await this.forward({
           id: correlation,
           kind: WireKind.REQUEST,
-          type: RequestMessageType.CALL,
+          type: Packets.RequestMessageType.CALL,
           timestamp: Date.now(),
           payload: { service, method, args: substitutes, control },
-        } satisfies CallRequestPacket);
+        } satisfies Packets.CallRequestPacket);
 
-        await this.send({
+        await this.send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
-          type: ResponseMessageType.STREAM,
+          type: Packets.ResponseMessageType.STREAM,
           payload: { event: "credit", ref: correlation, credit: this.config.creditWindow },
-        } satisfies OmitStandardFields<StreamResponsePacket>);
+        });
 
         this.logger?.trace(`Stream ${clip(correlation)} initial credit grant sent`);
       } catch (cause: unknown) {
@@ -775,11 +831,11 @@ export class Session {
         // Notify the producer to abort. Fire-and-forget; cleanup is
         // local and must not wait on the wire.
         void self
-          .send({
+          .send<Packets.CancelRequestPacket>({
             kind: WireKind.REQUEST,
-            type: RequestMessageType.CANCEL,
+            type: Packets.RequestMessageType.CANCEL,
             payload: { ref: correlation },
-          } satisfies OmitStandardFields<CancelRequestPacket>)
+          })
           .catch(() => {
             // observable; consumer already abandoned the iterator
           });
@@ -792,11 +848,11 @@ export class Session {
       async throw(error?: unknown): Promise<IteratorResult<unknown, undefined>> {
         self.logger?.trace(`Stream ${clip(correlation)} consumer threw; sending CANCEL`);
         void self
-          .send({
+          .send<Packets.CancelRequestPacket>({
             kind: WireKind.REQUEST,
-            type: RequestMessageType.CANCEL,
+            type: Packets.RequestMessageType.CANCEL,
             payload: { ref: correlation },
-          } satisfies OmitStandardFields<CancelRequestPacket>)
+          })
           .catch(() => {
             // observable
           });
@@ -809,56 +865,9 @@ export class Session {
     };
   }
 
-  /**
-   * Awaits the next inbound packet matching `kind` (and optional `predicate`) via the session {@link Router}.
-   * @throws {@link QuiryError} `DEADLINE_EXCEEDED` on timeout, `ABORTED` on signal — not the raw `Error` strings from {@link Router.wait}.
-   */
-  async wait<K extends AnyPacket["kind"], R extends PacketByKind<K>>(
-    kind: K,
-    predicate?: (packet: PacketByKind<K>) => packet is R,
-    { timeout, signal }: { timeout?: number; signal?: AbortSignal } = {},
-  ): Promise<R> {
-    // @ts-expect-error: no plans to type this properly
-    return this.conveyor
-      .wait((packet) => packet.kind === kind && (predicate ? predicate(packet as R) : true), {
-        timeout,
-        signal,
-      })
-      .catch((error: unknown) => {
-        if (error instanceof Error && error.message.includes("Timeout")) {
-          throw new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for packet", {
-            cause: error,
-          });
-        }
-        throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause: error });
-      });
-  }
-
-  /** Registers a session-scoped callback stub; pair with {@link Session.release} or `CallbackHandle` dispose. */
-  bind<T extends Function>(fn: T): Callback {
-    const callback = this.callbacks.register(fn, CallbackScope.STACK);
-    this.logger?.debug(`Created callback proxy ${clip(callback)}`);
-    return { [stub]: true, id: callback, scope: CallbackScope.STACK } satisfies Callback;
-  }
-
-  release(id: CallbackId): boolean {
-    const removed = this.callbacks.release(id);
-    if (removed) this.logger?.debug(`Released callback proxy ${clip(id)}`);
-    return removed;
-  }
-
-  /**
-   * Test/observability surface: cheap membership check on the local
-   * callback registry. Public because tests need a non-polling way to
-   * assert the registry's contents without reaching through `status`.
-   */
-  callable(id: CallbackId): boolean {
-    return this.callbacks.get(id) !== undefined;
-  }
-
   // --------- INTERNALS: ROUTING --------- //
 
-  private routeIncomingPacket(packet: AnyPacket): void {
+  private routeIncomingPacket(packet: Packets.AnyPacket): void {
     // Each handle* is fire-and-forget (concurrent). Any unhandled throw
     // from them is an internal bug, not a protocol violation — route via
     // the supervisor with `fatal` severity since the session's state may
@@ -901,9 +910,9 @@ export class Session {
     }
   }
 
-  private handleSystemPacket(packet: AnySystemPacket): void {
+  private handleSystemPacket(packet: Packets.AnySystemPacket): void {
     switch (packet.type) {
-      case SystemMessageType.DRAIN: {
+      case Packets.SystemMessageType.DRAIN: {
         if (this.#state === SessionState.CLOSED) return;
 
         // Capture the peer's DRAIN correlation id. The terminal
@@ -919,11 +928,11 @@ export class Session {
           // quiesce step in `performDrain` won't run again for this
           // new ref.
           if (this.#drain_quiesced) {
-            void this.send({
+            void this.send<Packets.SystemDrainAckPacket>({
               kind: WireKind.SYSTEM,
-              type: SystemMessageType.DRAIN_ACK,
+              type: Packets.SystemMessageType.DRAIN_ACK,
               payload: { ref: packet.id, uptime: process.uptime() },
-            } satisfies OmitStandardFields<SystemDrainAckPacket>).catch(() => null);
+            }).catch(() => null);
           }
           return;
         }
@@ -945,11 +954,11 @@ export class Session {
     }
   }
 
-  private async handleRequestPacket(packet: AnyRequestPacket): Promise<void> {
-    if (packet.type === RequestMessageType.ABORT) {
-      this.#controllers.get(packet.payload.ref)?.abort();
+  private async handleRequestPacket(packet: Packets.AnyRequestPacket): Promise<void> {
+    if (packet.type === Packets.RequestMessageType.ABORT) {
+      this.controllers.get(packet.payload.ref)?.abort();
       return;
-    } else if (packet.type === RequestMessageType.CANCEL) {
+    } else if (packet.type === Packets.RequestMessageType.CANCEL) {
       // CANCEL bypasses any queue/semaphore — the producer must stop
       // emitting as soon as possible. The cancel is idempotent: missing
       // refs (already completed, already cancelled) are observable, not
@@ -969,15 +978,15 @@ export class Session {
 
     this.inbound.run(async () => {
       if (this.#state === SessionState.DRAINING) {
-        return await this.send({
+        return await this.send<Packets.ValueResponsePacket>({
           kind: WireKind.RESPONSE,
-          type: ResponseMessageType.VALUE,
+          type: Packets.ResponseMessageType.VALUE,
           payload: {
             ref: packet.id,
             status: WireStatus.CANCELLED,
             error: toWireError(new QuiryError(WireStatus.DRAINING, "Session is draining", context)),
           },
-        } satisfies OmitStandardFields<ValueResponsePacket>);
+        });
       }
 
       if (
@@ -985,9 +994,9 @@ export class Session {
         packet.payload.control?.timeout !== undefined &&
         packet.timestamp >= Date.now() + packet.payload.control.timeout
       ) {
-        return await this.send({
+        return await this.send<Packets.ValueResponsePacket>({
           kind: WireKind.RESPONSE,
-          type: ResponseMessageType.VALUE,
+          type: Packets.ResponseMessageType.VALUE,
           payload: {
             ref: packet.id,
             status: WireStatus.DEADLINE_EXCEEDED,
@@ -995,7 +1004,7 @@ export class Session {
               new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Request operation timed out", context),
             ),
           },
-        } satisfies OmitStandardFields<ValueResponsePacket>);
+        });
       }
 
       // dispatch the request to the event listener
@@ -1010,7 +1019,7 @@ export class Session {
       let controller: AbortController | undefined;
       if ("control" in packet.payload && packet.payload.control?.abortable) {
         controller = new AbortController();
-        this.#controllers.set(packet.id, controller);
+        this.controllers.set(packet.id, controller);
       }
 
       try {
@@ -1033,7 +1042,7 @@ export class Session {
               "Timeout waiting for inquiry response",
             ),
             controller?.signal,
-          ).finally(() => controller && this.#controllers.delete(packet.id));
+          ).finally(() => controller && this.controllers.delete(packet.id));
 
           const substituted = this.callbacks.substitute(value);
           if (!isSerializable(substituted))
@@ -1042,30 +1051,30 @@ export class Session {
               detail: { value: substituted },
             });
 
-          await this.send({
+          await this.send<Packets.ValueResponsePacket>({
             kind: WireKind.RESPONSE,
-            type: ResponseMessageType.VALUE,
+            type: Packets.ResponseMessageType.VALUE,
             payload: {
               ref: packet.id,
               status: WireStatus.OK,
               result: substituted,
             },
-          } satisfies OmitStandardFields<ValueResponsePacket>);
+          });
         }
       } catch (cause: unknown) {
         // The session stays up; the caller learns about the failure via the wire error.
         const error = QuiryError.from(cause, context);
         this.logger?.trace(`Request ${clip(packet.id)} response failed: ${error.message} (${error.code})`);
 
-        await this.send({
+        await this.send<Packets.ValueResponsePacket>({
           kind: WireKind.RESPONSE,
-          type: ResponseMessageType.VALUE,
+          type: Packets.ResponseMessageType.VALUE,
           payload: {
             ref: packet.id,
             status: error.code as Exclude<WireStatus, typeof WireStatus.OK>,
             error: toWireError(error),
           },
-        } satisfies OmitStandardFields<ValueResponsePacket>).catch((reason: unknown) => {
+        }).catch((reason: unknown) => {
           // If we can't even send the error, something deeper is wrong —
           // the transport itself will emit an error event separately.
           this.logger?.warn(
@@ -1082,14 +1091,14 @@ export class Session {
     });
   }
 
-  private async handleResponsePacket(packet: AnyResponsePacket): Promise<void> {
+  private async handleResponsePacket(packet: Packets.AnyResponsePacket): Promise<void> {
     if (!packet.payload.ref) {
       // Protocol quirk rather than a real error — log and drop.
       this.logger?.trace(`Received response packet with no reference: ${clip(packet.id)}`);
       return;
     }
 
-    if (packet.type === ResponseMessageType.STREAM) {
+    if (packet.type === Packets.ResponseMessageType.STREAM) {
       const { ref, event } = packet.payload;
 
       // route to the outbound stream registry rather than the
@@ -1140,11 +1149,11 @@ export class Session {
             entry.credit.remaining += grant;
 
             // Send the delta, not the absolute remaining, and bump the local view up.
-            void this.send({
+            void this.send<Packets.StreamResponsePacket>({
               kind: WireKind.RESPONSE,
-              type: ResponseMessageType.STREAM,
+              type: Packets.ResponseMessageType.STREAM,
               payload: { event: "credit", ref, credit: grant },
-            } satisfies OmitStandardFields<StreamResponsePacket>).catch((cause: unknown) => {
+            }).catch((cause: unknown) => {
               this.logger?.debug(
                 `Failed to send credit grant for stream ${clip(ref)}: ${cause instanceof Error ? cause.message : String(cause)}`,
               );
@@ -1231,9 +1240,9 @@ export class Session {
     );
   }
 
-  private async handleCallbackPacket(packet: AnyCallbackPacket): Promise<void> {
+  private async handleCallbackPacket(packet: Packets.AnyCallbackPacket): Promise<void> {
     switch (packet.type) {
-      case CallbackMessageType.INVOKE: {
+      case Packets.CallbackMessageType.INVOKE: {
         const { ref, eid, callback, args } = packet.payload;
         if (ref) this.#inflight_invocations.set(ref, (this.#inflight_invocations.get(ref) ?? 0) + 1);
 
@@ -1245,9 +1254,9 @@ export class Session {
             // Callback not found
             this.logger?.warn(`Callback ${callback} not found (${clip(packet.id)})`);
 
-            await this.send({
+            await this.send<Packets.CallbackReturnPacket>({
               kind: WireKind.CALLBACK,
-              type: CallbackMessageType.RETURN,
+              type: Packets.CallbackMessageType.RETURN,
               payload: {
                 ref,
                 eid,
@@ -1257,16 +1266,16 @@ export class Session {
                   new QuiryError(WireStatus.NOT_FOUND, "Callback not found. Did you release it?", context),
                 ),
               },
-            } satisfies OmitStandardFields<CallbackReturnPacket>);
+            });
             return;
           }
 
           const result = await fn(...args);
-          await this.send({
+          await this.send<Packets.CallbackReturnPacket>({
             kind: WireKind.CALLBACK,
-            type: CallbackMessageType.RETURN,
+            type: Packets.CallbackMessageType.RETURN,
             payload: { ref, eid, callback, status: WireStatus.OK, result },
-          } satisfies OmitStandardFields<CallbackReturnPacket>);
+          });
         } catch (cause: unknown) {
           // Callback-invoke boundary — non fatal.
           const error = QuiryError.from(cause, context);
@@ -1274,9 +1283,9 @@ export class Session {
             `Callback invocation failed for packet ${clip(packet.id)}: ${error.message} (${error.code})`,
           );
 
-          await this.send({
+          await this.send<Packets.CallbackReturnPacket>({
             kind: WireKind.CALLBACK,
-            type: CallbackMessageType.RETURN,
+            type: Packets.CallbackMessageType.RETURN,
             payload: {
               ref,
               eid,
@@ -1284,20 +1293,25 @@ export class Session {
               status: error.code as Exclude<WireStatus, typeof WireStatus.OK>,
               error: toWireError(error),
             },
-          } satisfies OmitStandardFields<CallbackReturnPacket>).catch((reason: unknown) => {
+          }).catch((reason: unknown) => {
             this.logger?.warn(
               `Failed to send callback error for packet ${clip(packet.id)}: ${reason instanceof Error ? reason.message : String(reason)}`,
             );
           });
         } finally {
-          if (ref) this.decrementInflightInvocations(ref);
+          if (ref) {
+            // Decrement the inflight invocation count.
+            const n = this.#inflight_invocations.get(ref) ?? 0;
+            if (n <= 1) this.#inflight_invocations.delete(ref);
+            else this.#inflight_invocations.set(ref, n - 1);
+          }
         }
 
         break;
       }
 
-      case CallbackMessageType.RETURN: {
-        const { ref, eid, status } = packet.payload;
+      case Packets.CallbackMessageType.RETURN: {
+        const { eid, status } = packet.payload;
         const invocation = this.#pending_invocations.get(eid);
         if (!invocation) {
           // Stale return — the local invocation already timed out and
@@ -1320,20 +1334,24 @@ export class Session {
         break;
       }
 
-      case CallbackMessageType.RELEASE: {
+      case Packets.CallbackMessageType.RELEASE: {
         const { ref, callbacks } = packet.payload;
         for (const callback of callbacks) {
           // Missing callback on release is idempotent and expected —
           // e.g. we released it locally first. Observable-only.
           const released = this.callbacks.release(callback);
-          if (released && this.logger) {
-            this.logger.trace(
-              ref
-                ? `Released callback ${clip(callback)} for packet ${clip(ref)}`
-                : packet.payload.gc
-                  ? `Released garbage collected callback ${clip(callback)}`
-                  : `Released out of scope callback ${clip(callback)}`,
-            );
+          if (released) {
+            this.emitter.emit("callback-released", callback);
+
+            if (this.logger) {
+              this.logger.trace(
+                ref
+                  ? `Released callback ${clip(callback)} for packet ${clip(ref)}`
+                  : packet.payload.gc
+                    ? `Released garbage collected callback ${clip(callback)}`
+                    : `Released out of scope callback ${clip(callback)}`,
+              );
+            }
           }
         }
 
@@ -1410,21 +1428,21 @@ export class Session {
         }
 
         stream.credit--;
-        await this.send({
+        await this.send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
-          type: ResponseMessageType.STREAM,
+          type: Packets.ResponseMessageType.STREAM,
           payload: { event: "chunk", ref, seq, chunk },
-        } satisfies OmitStandardFields<StreamResponsePacket>);
+        });
 
         seq++;
       }
 
       if (stream.cancelled) return;
-      await this.send({
+      await this.send<Packets.StreamResponsePacket>({
         kind: WireKind.RESPONSE,
-        type: ResponseMessageType.STREAM,
+        type: Packets.ResponseMessageType.STREAM,
         payload: { event: "end", ref, seq },
-      } satisfies OmitStandardFields<StreamResponsePacket>);
+      });
 
       this.logger?.trace(`Outbound stream ${clip(ref)} ended (${seq} chunks sent)`);
     } catch (cause: unknown) {
@@ -1434,16 +1452,16 @@ export class Session {
         `Outbound stream ${clip(ref)} errored at seq=${seq}: ${error.message} (${error.code})`,
       );
 
-      await this.send({
+      await this.send<Packets.StreamResponsePacket>({
         kind: WireKind.RESPONSE,
-        type: ResponseMessageType.STREAM,
+        type: Packets.ResponseMessageType.STREAM,
         payload: {
           event: "error",
           ref,
           seq,
           error: toWireError(error, { correlationId: ref }),
         },
-      } satisfies OmitStandardFields<StreamResponsePacket>).catch((reason: unknown) => {
+      }).catch((reason: unknown) => {
         this.logger?.warn(
           `Failed to send stream error for ${clip(ref)}: ${reason instanceof Error ? reason.message : String(reason)}`,
         );
@@ -1495,23 +1513,23 @@ export class Session {
     if (!stubs || stubs.size === 0) return;
 
     this.logger?.trace(`Sending release yield for packet ${clip(ref)} of ${stubs.size} callbacks`);
-    await this.send({
+    await this.send<Packets.CallbackReleasePacket>({
       kind: WireKind.CALLBACK,
-      type: CallbackMessageType.RELEASE,
+      type: Packets.CallbackMessageType.RELEASE,
       payload: { ref, callbacks: Array.from(stubs) },
-    } satisfies OmitStandardFields<CallbackReleasePacket>);
+    });
   }
 
   private async releaseSessionCallbacks(): Promise<void> {
-    const released = this.callbacks.releaseStackScoped();
+    const released = this.callbacks.releaseSessionScoped();
     if (released.length === 0) return;
 
     // Best-effort: during drain the transport may already be down.
-    await this.send({
+    await this.send<Packets.CallbackReleasePacket>({
       kind: WireKind.CALLBACK,
-      type: CallbackMessageType.RELEASE,
+      type: Packets.CallbackMessageType.RELEASE,
       payload: { ref: null, callbacks: released },
-    } satisfies OmitStandardFields<CallbackReleasePacket>).catch(() => null);
+    }).catch(() => null);
   }
 
   /**
@@ -1550,25 +1568,20 @@ export class Session {
     });
   }
 
-  private decrementInflightInvocations(ref: CorrelationId): void {
-    const n = this.#inflight_invocations.get(ref) ?? 0;
-    n <= 1 ? this.#inflight_invocations.delete(ref) : this.#inflight_invocations.set(ref, n - 1);
-  }
-
   /**
    * Rebuilds the argument list on the receiver side: replaces each {@link Callback} stub
    * found anywhere in the graph with a live async function that sends `CBK:INVOKE`
    * and awaits `CBK:RETURN`.
    *
-   * `LOCAL`-scoped stub ids are tracked in `#remote_stubs[ref]` for bulk `CBK:RELEASE`
-   * once the owning request completes; `STACK`-scoped stubs survive the request.
+   * `CALL`-scoped stub ids are tracked in `#remote_stubs[ref]` for bulk `CBK:RELEASE`
+   * once the owning request completes; `SESSION`-scoped stubs survive the request.
    *
    * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
    * Cycles are short-circuited via the `seen` map.
    */
   private restoreStubs<T>(value: T, ref: CorrelationId | null, finalize: boolean = false): T {
     const track = (stub: Callback): CallbackId => {
-      if (ref === null || stub.scope === CallbackScope.STACK) return stub.id;
+      if (ref === null || stub.scope === CallbackScope.SESSION) return stub.id;
       let set = this.#remote_stubs.get(ref);
       if (!set) {
         set = new Set();
@@ -1584,7 +1597,7 @@ export class Session {
       if (isCallbackStub(value)) {
         const id = track(value);
         const fn = this.makeRemoteCallback(id, ref, value.scope);
-        if (finalize) this.#finalization_registry.register(fn, id);
+        if (finalize) this.finalization.register(fn, id);
         return fn;
       }
       if (value === null || typeof value !== "object") return value;
@@ -1617,8 +1630,8 @@ export class Session {
 
   /**
    * Creates an async proxy for a remote callback. Each call sends `CBK:INVOKE` and awaits
-   * the `CBK:RETURN` packet. `LOCAL`-scoped invocations are bounded by `defaultTimeout`
-   * to prevent leaks from a misbehaving peer; `STACK`-scoped invocations are intentionally
+   * the `CBK:RETURN` packet. `CALL`-scoped invocations are bounded by `defaultTimeout`
+   * to prevent leaks from a misbehaving peer; `SESSION`-scoped invocations are intentionally
    * unbounded — long-lived event handlers are the very thing they exist for, and capping
    * them at the unary timeout silently breaks that use case.
    *
@@ -1633,7 +1646,7 @@ export class Session {
     return (...args: unknown[]): Promise<unknown> => {
       const eid = `${callback}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
 
-      const timeout = scope === CallbackScope.STACK ? null : this.config.defaultTimeout;
+      const timeout = scope === CallbackScope.SESSION ? null : this.config.defaultTimeout;
       return new Promise<unknown>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         if (timeout !== null) {
@@ -1672,9 +1685,9 @@ export class Session {
 
         void this.send({
           kind: WireKind.CALLBACK,
-          type: CallbackMessageType.INVOKE,
+          type: Packets.CallbackMessageType.INVOKE,
           payload: { ref, eid, callback, args },
-        } satisfies OmitStandardFields<CallbackInvokePacket>).catch((error: unknown) => {
+        }).catch((error: unknown) => {
           const pending = this.#pending_invocations.get(eid);
           if (!pending) return;
 
@@ -1715,8 +1728,8 @@ export class Session {
       streams: this.#outbound_streams.size,
       callbacks: this.callbacks.size,
       invocations: this.#pending_invocations.size,
-      stubs,
       backpressure: this.transport.backpressure,
+      stubs,
     };
   }
 

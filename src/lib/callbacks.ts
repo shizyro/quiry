@@ -1,7 +1,7 @@
 import { isPlainObject } from "./helpers";
 import type { CallbackId, CorrelationId } from "../interface/types";
 
-import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
 
 /**
  * A symbol used to mark callback that aren't real local functions,
@@ -20,9 +20,9 @@ export interface Callback {
 
 export enum CallbackScope {
   /** Registered at invocation, and automatically released after the call completes. */
-  LOCAL,
+  CALL,
   /** Pre-registered long-lived callback, available till manual release. */
-  STACK,
+  SESSION,
 }
 
 export function isCallbackStub(value: unknown): value is Callback {
@@ -33,12 +33,16 @@ type CallbackEntry = {
   readonly id: CallbackId;
   readonly fn: Function;
 } & (
-  | { readonly scope: CallbackScope.LOCAL; readonly ref: CorrelationId }
-  | { readonly scope: CallbackScope.STACK }
+  | { readonly scope: CallbackScope.CALL; readonly ref: CorrelationId }
+  | { readonly scope: CallbackScope.SESSION }
 );
 
-/** In-process callback table keyed by id; LOCAL entries are grouped by request `ref` for bulk release. */
+/** In-process callback table keyed by id; CALL entries are grouped by request `ref` for bulk release. */
 export class CallbackRegistry {
+  static genid(): CallbackId {
+    return randomUUID() as CallbackId;
+  }
+
   readonly #by_id = new Map<CallbackId, CallbackEntry>();
   readonly #by_ref = new Map<CorrelationId, Set<CallbackId>>();
   readonly #session_scoped = new Set<CallbackId>();
@@ -46,18 +50,18 @@ export class CallbackRegistry {
   /**
    * Registers a callback with the given scope and optional correlation ID.
    */
-  register(fn: Function, scope: CallbackScope.STACK): CallbackId;
-  register(fn: Function, scope: CallbackScope.LOCAL, ref: CorrelationId): CallbackId;
+  register(fn: Function, scope: CallbackScope.SESSION): CallbackId;
+  register(fn: Function, scope: CallbackScope.CALL, ref: CorrelationId): CallbackId;
   register(fn: Function, scope: CallbackScope, ref?: CorrelationId): CallbackId {
-    if (scope === CallbackScope.LOCAL && !ref) {
+    if (scope === CallbackScope.CALL && !ref) {
       throw new Error("A bound callback must be registered with a correlation ID.");
     }
 
-    const id = nanoid() as CallbackId;
+    const id = CallbackRegistry.genid();
     const entry = { id, fn, scope, ref: ref! } satisfies CallbackEntry;
 
     this.#by_id.set(id, entry);
-    if (scope === CallbackScope.LOCAL) {
+    if (scope === CallbackScope.CALL) {
       let set = this.#by_ref.get(ref!);
       if (!set) {
         set = new Set();
@@ -80,7 +84,7 @@ export class CallbackRegistry {
     if (!entry) return false;
 
     this.#by_id.delete(id);
-    if (entry.scope === CallbackScope.LOCAL) {
+    if (entry.scope === CallbackScope.CALL) {
       this.#by_ref.get(entry.ref)?.delete(id);
     } else this.#session_scoped.delete(id);
 
@@ -88,7 +92,7 @@ export class CallbackRegistry {
   }
 
   /**
-   * Removes all `LOCAL`-scoped callbacks registered under `ref` and returns their ids.
+   * Removes all `CALL`-scoped callbacks registered under `ref` and returns their ids.
    * Used after a request completes to bulk-release all function arguments that were
    * substituted as stubs for that request.
    */
@@ -102,10 +106,10 @@ export class CallbackRegistry {
   }
 
   /**
-   * Removes all `STACK`-scoped (session-lifetime) callbacks and returns their ids.
+   * Removes all `SESSION`-scoped (session-lifetime) callbacks and returns their ids.
    * Called during session drain so the remote side can be notified via `CBK:RELEASE`.
    */
-  releaseStackScoped(): ReadonlyArray<CallbackId> {
+  releaseSessionScoped(): ReadonlyArray<CallbackId> {
     if (this.#session_scoped.size === 0) return [];
     const ids = Array.from(this.#session_scoped);
     for (const id of ids) this.#by_id.delete(id);
@@ -130,11 +134,11 @@ export class CallbackRegistry {
    */
   substitute<T>(value: T, ref?: CorrelationId): T {
     const seen = new WeakMap<object, unknown>();
-    const scope = ref ? CallbackScope.LOCAL : CallbackScope.STACK;
+    const scope = ref ? CallbackScope.CALL : CallbackScope.SESSION;
 
     const walk = (block: unknown): unknown => {
       if (typeof block === "function") {
-        // @ts-expect-error - `scope` is always `CallbackScope.LOCAL` or `CallbackScope.STACK`
+        // @ts-expect-error - `scope` is always `CallbackScope.CALL` or `CallbackScope.SESSION`
         const id = this.register(block, scope, ref);
         return { [stub]: true, id, scope } satisfies Callback;
       }
@@ -165,6 +169,12 @@ export class CallbackRegistry {
     };
 
     return walk(value) as T;
+  }
+
+  /** Registers a function as a `SESSION`-scoped callback and returns a callback handle. */
+  bind(fn: Function): Callback {
+    const id = this.register(fn, CallbackScope.SESSION);
+    return { [stub]: true, id, scope: CallbackScope.SESSION } satisfies Callback;
   }
 
   get size(): number {

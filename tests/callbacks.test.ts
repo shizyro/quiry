@@ -89,11 +89,11 @@ describe("Session callbacks", () => {
       });
 
       // The substitute call happens synchronously inside `request()`,
-      // so the registry already shows the LOCAL entry before the
+      // so the registry already shows the CALL entry before the
       // promise has had a chance to roundtrip on the wire.
       expect(pair.consumer.status.callbacks).toBe(1);
 
-      // Force-close to abort the hanging request — the LOCAL callback
+      // Force-close to abort the hanging request — the CALL callback
       // is still in the registry because no RELEASE has been sent.
       await pair.consumer.close("explicit", false);
       await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED });
@@ -181,13 +181,11 @@ describe("Session callbacks", () => {
         },
       });
 
-      const cb = pair.consumer.bind(fn);
+      const cb = pair.consumer.proxy(fn);
       await expect(pair.consumer.request("_", "_", [cb, 1])).resolves.toBe(101);
       await expect(pair.consumer.request("_", "_", [cb, 2])).resolves.toBe(102);
 
       expect(fn).toHaveBeenCalledTimes(2);
-      // Stack-scoped — still in the registry after both requests.
-      expect(pair.consumer.callable(cb.id)).toBe(true);
     });
 
     it("stack-scoped stubs survive RELEASE round-trips for unrelated local callbacks", async () => {
@@ -200,13 +198,18 @@ describe("Session callbacks", () => {
         },
       });
 
-      const cb = pair.consumer.bind(stackFn);
+      const listenerFn = vi.fn();
+      const unsubscribe = pair.consumer.on("callback-released", listenerFn);
+
+      const cb = pair.consumer.proxy(stackFn);
       const result = await pair.consumer.request("_", "_", [cb, () => "local"]);
       expect(result).toEqual(["stack", "local"]);
 
-      // Wait for the RELEASE for the STACK callback; the LOCAL one must remain.
+      // Wait for the RELEASE for the SESSION callback; the CALL one must remain.
       await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(1));
-      expect(pair.consumer.callable(cb.id)).toBe(true);
+      expect(listenerFn).toHaveBeenCalledTimes(1);
+      expect(listenerFn).not.toHaveBeenCalledWith(cb.id);
+      unsubscribe();
     });
 
     it("invoking a stack-scoped callback after local release returns undefined to the proxy caller", async () => {
@@ -222,9 +225,9 @@ describe("Session callbacks", () => {
         },
       });
 
-      const cb = pair.consumer.bind(() => "should-not-fire");
+      const cb = pair.consumer.proxy(() => "should-not-fire");
       const promise = pair.consumer.request("_", "_", [cb]);
-      pair.consumer.release(cb.id);
+      cb.release();
 
       await promise;
       // The proxy swallows rejections (NOT_FOUND) and resolves with undefined.

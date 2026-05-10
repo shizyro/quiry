@@ -1,49 +1,13 @@
 {
   "name": "quiry",
   "version": "0.1.3",
-  "description": "Transparent, type-safe IPC for Node worker threads and child processes.",
-  "keywords": [
-    "ipc",
-    "worker",
-    "proxy"
-  ],
   "author": {
     "name": "Shizuka Yashiro",
     "email": "shizuka.yashiro@gmail.com"
   },
-  "license": "Apache-2.0",
-  "homepage": "https://github.com/shizyro/quiry#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/shizyro/quiry.git"
-  },
-  "bugs": {
-    "url": "https://github.com/shizyro/quiry/issues"
-  },
-  "type": "module",
-  "sideEffects": false,
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
-    }
-  },
-  "engines": {
-    "node": ">=18.17.0"
-  },
-  "scripts": {
-    "build": "bunchee --sourcemap --target es2015",
-    "test": "vitest",
-    "lint": "biome lint",
-    "lint:fix": "biome lint --write",
-    "fmt": "biome format --write",
-    "prepare": "husky"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.14",
@@ -53,7 +17,40 @@
     "typescript": "^5",
     "vitest": "^4.1.5"
   },
-  "dependencies": {
-    "nanoid": "^5.1.9"
-  }
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bugs": {
+    "url": "https://github.com/shizyro/quiry/issues"
+  },
+  "description": "Transparent, type-safe IPC for Node worker threads and child processes.",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "homepage": "https://github.com/shizyro/quiry#readme",
+  "keywords": [
+    "ipc",
+    "worker",
+    "proxy"
+  ],
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "bunchee --sourcemap --target es2015",
+    "test": "vitest",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "fmt": "biome format --write",
+    "prepare": "husky"
+  },
+  "sideEffects": false,
+  "type": "module"
 }
