@@ -26,15 +26,18 @@ Quiry.fork(join(__dirname, "child.ts"));
 
 class MathService {
   version: string = "1.0.0";
-  
-  add(a: number, b: number): number { return a + b; }
+
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
   *range(start: number, end: number) {
     for (let i = start; i <= end; i++) yield i;
   }
 }
 
 // expose a service with a unique identifier
-Quiry.expose("math", new MathService());
+Quiry.expose("math", MathService);
 
 export type ServiceRegistry = {
   math: MathService;
@@ -48,32 +51,22 @@ import type { ServiceRegistry } from "./host";
 
 // attach to host, and keep a peer reference to later query exposed services
 const peer = Quiry.attach<ServiceRegistry>(new ChildProcessTransport());
-const math = peer.service("math"); // typed RemoteServiceDefinition<MathService>
+const math = peer.service("math"); // Remote<MathService>
 
-console.log(await math.version); // property access
-console.log(await math.add(1, 2)); // method call
-for await (const n of math.range(1, 3)) { // async iterators
-  console.log(n);
+console.log(await math.version); // 1.0.0
+console.log(await math.add(1, 2)); // 3
+for await (const n of math.range(1, 3)) {
+  console.log(n); // 1, 2, 3
 }
 ```
 
-The proxy returned by `peer.service(...)` has the exact shape of the original interface, wrapped in an async transformer. Typing the registry across the boundary currently has a few options — importing and passing the service type directly, augmenting the global registry, or an explicit generic at the callsite:
+The proxy returned by `peer.service(...)` has the exact shape of the original interface, wrapped in an async transformer. You export and pass the service registry into the peer generic, or directly into the service callsite to override the inferred type.
 
 ```typescript
-peer.service<MathService>("math");
+const peer = Quiry.attach<Registry>(...);
+peer.service("foo"); // Inferred from Registry
+peer.service<FooService>("foo"); // Type override
 ```
-
-```typescript
-declare module "quiry" {
-  interface GlobalServiceRegistry {
-    host: {
-      math: MathService;
-      // ...
-    };
-  }
-}
-```
-> The namespace model was a deliberate tradeoff; it makes the framework easier to use at the cost of some type inference elegance. Better ergonomics are still being explored.
 
 `Quiry.fork()` and `Quiry.spawn()` are convenience methods that handle transport construction. If you need more control over the worker instance, you can construct it yourself and attach manually:
 
@@ -82,10 +75,12 @@ const worker = new Worker("worker.ts");
 Quiry.attach(new WorkerThreadsTransport({ worker }));
 ```
 
+For a more detailed showcase, make sure to check this [basic example](https://github.com/shizyro/quiry/tree/main/examples/basic);
+
 
 ## Streaming
 
-Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks as it becomes available rather than waiting for the full result, this is done through [Generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator). Normally across such boundary, this would require some of an emitter, manual chunking over wire, or batching. None of those are particularly clean, and more importantly, none of them are how you'd write it locally.
+Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks as it becomes available rather than waiting for the full result, this is done through [Generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator). Normally, streaming across a process boundary means building an event protocol, manually chunking messages, or batching results. Quiry lets services expose generators instead.
 
 Streams should be pulled, not pushed. The problem is that there's no reliable way to know at runtime whether a remote method is a generator or a regular function. A separate opt-in API would feel off as well.
 
@@ -108,7 +103,7 @@ If the callsite feels natural, it should do what's expected.
 
 ## Callbacks
 
-Functions don't survive structured cloning, but we can't pretend they don't exist; half of what we do with event emitters, request handlers, or progress reporters need functions as arguments. Walkarounds are painful to deal with.
+Functions don't survive structured cloning, but we can't pretend they don't exist; half of what we do with event emitters, request handlers, or progress reporters need functions as arguments. Workarounds are painful to deal with.
 
 If your method accepts a callback, the caller should be able to pass one.
 
@@ -121,7 +116,7 @@ Quiry replaces functional arguments with lightweight serializable stubs, and sen
 
 However, with that, the garbage collector cannot decide on functions with no actual local [references](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Memory_management#references). And so, **callback lifetimes are explicit**. You can either pass functions inline, making them tied to the call — when the call settles, they're released automatically with no cleanup required, or, wrap that function in a **callback proxy**.  
 
-Callback proxies are session-scoped, outliving a single call. They are released explicitly with `.release()`, when the wrapper goes out of scope under [TC39 explicit resource management](https://github.com/tc39/proposal-explicit-resource-management), or when the session itself drains.
+Callback proxies are session-scoped, outliving a single call. They are released explicitly with `.release()`, or when the wrapper goes out of scope under [TC39 explicit resource management](https://github.com/tc39/proposal-explicit-resource-management). If your runtime supports [WeakRefs](https://github.com/tc39/proposal-weakrefs), the callback proxy will be released automatically at remote side when its garbage collected.
 
 ```typescript
 // released when the call returns
@@ -139,17 +134,17 @@ await peer.service<StreamService>("stream").subscribe("updates", handle);
 // the callback is released automatically when the scope exits
 ```
 
-Callbacks are always asynchronous from the caller's perspective, but that is only a constraint to account for the invocation roundtrip.
+Callbacks are always asynchronous from the remote caller’s perspective because invoking them requires an IPC round trip. Design remote methods so callback parameters may return promises.
 
 ### Returned Function Stubs
 
-Conduit transparently handles functions that appear in **return values** from remote service methods — not just in arguments passed to them. When a service method returns a function (or a plain object containing functions), those functions are automatically translated into callback stubs that work identically to locally-defined functions.
+Quiry transparently handles functions that appear in **return values** from remote service methods — not just in arguments passed to them. When a service method returns a function (or a plain object containing functions), those functions are automatically translated into callback proxies that work identically to locally-defined functions.
 
 ```typescript
 // example of a higher order function
 listen(event: string, listener: (...args: unknown[]) => void): Unsubscribe {
   this.emitter.on(event, listener);
-  return () => this.emitter.off(event, listener);
+  return () => void this.emitter.off(event, listener);
 }
 ```
 
@@ -160,21 +155,28 @@ await off();
 // the callback is released from peer side when it's no longer used
 ```
 
-These returned function stubs are session-scoped on the caller side. They live for as long as the caller holds a reference, and are automatically released from remote side once the stub is **no longer referenced**, and it is reclaimed by GC. This done via the Javascript [FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry) observability, in which it's used to [eventually](https://github.com/tc39/proposal-weakrefs#a-note-of-caution) notify the remote peer.
+These returned function stubs are session-scoped on the caller side. They live for as long as the caller holds a reference, and are automatically released from remote side once the stub is **no longer referenced**, and it is reclaimed by GC. This done with Javascript's [FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry), which allows to eventually notify the remote peer after the local stub is collected.
 
 
 ## Limitations
 
 Everything crossing a thread boundary goes through structured cloning. That comes with constraints worth knowing upfront.
 
-Non-serializable values, whether passed as arguments or retrieved through wire; methods returning `this`, class instances (the prototype chain doesn't survive, only the data), circular references, or any other non-serializable values will not work — expect functions, for now; they're handled through callback proxies.
+Structured-cloneable data works as expected: primitives, arrays, plain objects, and other values supported by the underlying runtime transport.
 
-Transferables and `SharedArrayBuffer` are not supported yet. That direction is planned, but unsolved.
+Some values are intentionally limited or not supported yet:
+
+- class instances cross the boundary as data, not as live instances with their prototype chain intact
+- methods returning `this` are not useful across the boundary
+- non-serializable values do not work unless provided a specific proxy mechanism for them
+- functions are supported through callback proxies and returned function stubs, not through structured cloning itself
+
+Transferables and `SharedArrayBuffer` support are planned, but the API and ownership semantics are not settled.
 
 
 ## Status
 
-Single-author project, pre-1.0. The internal protocol shape is mostly stable. The public API surface still has open decisions, and is not settled on.
+Single-author project, pre-1.0. The internal protocol shape is mostly stable, but the public API surface still has open decisions and may change before a stable release.
 > This project is under active development. Many edge cases have not been tested. If you encounter any issues, please [open an issue](https://github.com/shizyro/quiry/issues).
 
 All contents of this repository and its history are licensed under Apache License 2.0.

@@ -21,7 +21,7 @@ export enum WireStatus {
   INVALID_ARGUMENT,
   /** Deadline expired before the call could be completed. */
   DEADLINE_EXCEEDED,
-  /** The requested service or method does not exist. */
+  /** The requested service or property does not exist. */
   NOT_FOUND,
   /** Data lost during transmission. */
   DATA_LOSS,
@@ -35,16 +35,12 @@ export enum WireStatus {
   INTERNAL,
   /** Handler returned a value that is not of the expected type. */
   MALFORMED_RESPONSE,
-  /** The operation is not implemented on the service. */
-  UNIMPLEMENTED,
   /** Peer is not reachable or the transport failed. */
   UNAVAILABLE,
   /** Peer died. */
   PEER_GONE,
   /** Peer is draining and will not accept new work. */
   DRAINING,
-  /** A broker relay loop was detected. */
-  ROUTING_LOOP,
   /** Concurrency limit exceeded on this service or globally. */
   OVERLOADED,
 }
@@ -94,15 +90,6 @@ export interface RetryPolicy {
   readonly backoffStrategy?: "fixed" | "exponential";
   readonly delay?: number;
 }
-
-/** @deprecated */
-export const HeartbeatStatus = {
-  HEALTHY: "healthy",
-  DEGRADED: "degraded",
-  CRITICAL: "critical",
-  DISCONNECTED: "disconnected",
-} as const;
-export type HeartbeatStatus = (typeof HeartbeatStatus)[keyof typeof HeartbeatStatus];
 
 /** @deprecated */
 export interface MetricsData {

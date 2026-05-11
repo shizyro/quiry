@@ -1,477 +1,428 @@
+/**
+ * @license Copyright 2026 Shizuka Yashiro
+ */
+
 import { fork as NJSFork, type ForkOptions as NJSForkOptions } from "node:child_process";
 import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 
 import { EventEmitter } from "node:events";
 
-import type { AnyPacket } from "./interface/packets";
-import type { ServiceRegistry, ServiceImpl } from "./interface/types";
-import type { RemoteServiceDefinition, RemotablePropertyKeys } from "./interface/transformers";
-import { WireStatus, type RequestControl } from "./interface/protocol";
+import { QuiryError } from "./shared/errors";
+import { Session, type InquiryFunc, type InquiryRequest } from "./core/session";
+import { PeerConnection, type PeerIdentifier } from "./internal";
 
-import { Session, type InquiryFunc, type InquiryRequest, type CallbackHandle } from "./core/session";
+import { WireStatus } from "./interface/protocol";
+import type { AnyPacket } from "./interface/packets";
+import type { ServiceImpl, ServiceRegistry } from "./interface/types";
 
 import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
 import { WorkerThreadsTransport } from "./core/transport/impl/worker-threads";
-
-import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/errors";
 import { isAnyIterableIterator, isSerializable } from "./lib/helpers";
 
 import { randomBytes } from "node:crypto";
 
-export interface GlobalServiceRegistry extends Record<Quiry.PeerIdentifier, ServiceRegistry> {}
+// ...
 
-namespace Quiry {
-  export type PeerIdentifier = string | symbol | number;
+const instances = new Map<Token, any>();
+const descriptors = new Map<Token, ServiceDescriptor>();
+const peers = new Map<PeerIdentifier, PeerConnection>();
 
-  export class PeerConnection<
-    TIdentifier extends PeerIdentifier = PeerIdentifier,
-    TServices extends ServiceRegistry = GlobalServiceRegistry[TIdentifier],
-  > {
-    private readonly cached = new Map<keyof TServices, ServiceImpl>();
-    constructor(
-      readonly identifier: TIdentifier,
-      private readonly session: Session,
-    ) {}
+export interface QuiryEvents {
+  "peer-connected": [handle: PeerConnection];
+  "peer-disconnected": [handle: PeerConnection, reason?: string];
+  shutdown: [reason?: string];
+  error: [error: Error];
+}
 
-    service<TOverride extends ServiceImpl = never, TName extends string = string>(
-      name: TName,
-    ): RemoteServiceDefinition<
-      [TOverride] extends [never]
-        ? TName extends keyof TServices
-          ? TServices[TName]
-          : ServiceImpl
-        : TOverride
-    > {
-      let proxy = this.cached.get(name);
-      if (!proxy) {
-        proxy = makeServiceProxy(name as string, this.session);
-        this.cached.set(name, proxy);
+const emitter = new EventEmitter<QuiryEvents>();
+let _logger: Logger | null = null;
+
+/**
+ * Install a logger sink. Pass `null` to disable logging.
+ * Logger is consulted by every active session and by the namespace itself.
+ */
+export function setLogger(logger: Logger | null): void {
+  _logger = logger;
+}
+
+export function on<K extends keyof QuiryEvents>(
+  event: K,
+  listener: (...args: QuiryEvents[K]) => void,
+): Unsubscribe {
+  emitter.on(event, listener as (...args: unknown[]) => void);
+  return () => emitter.off(event, listener as (...args: unknown[]) => void);
+}
+
+// --------- PUBLIC API: PERSISTENCE --------- //
+
+/** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
+export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
+  const subprocess = NJSFork(filename, options);
+  return attach(new ChildProcessTransport({ child: subprocess }));
+}
+
+/** Spawns a worker thread at `filename` and attaches it as a new peer via {@link WorkerThreadsTransport}. */
+export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
+  const worker = new NJSWorker(filename, options);
+  return attach(new WorkerThreadsTransport({ worker }));
+}
+
+export function attach<TServices extends ServiceRegistry = {}>(
+  transport: Transport<AnyPacket>,
+): PeerConnection<TServices> {
+  const session = new Session(transport, handleInquiry, {}, _logger).open();
+  const identifier = randomBytes(4).toString("hex");
+  const connection = new PeerConnection(identifier, session);
+  peers.set(identifier, connection);
+
+  session.on(
+    "terminate",
+    (reason?: string) => {
+      if (peers.delete(identifier)) {
+        emitter.emit("peer-disconnected", connection, reason);
+        _logger?.info(`Peer ${String(identifier)} disconnected`);
       }
-      // @ts-expect-error; ignore.
-      return proxy;
-    }
+    },
+    { once: true },
+  );
 
-    controlled<TName extends keyof TServices>(
-      identifier: TName,
-      control: RequestControl,
-    ): RemoteServiceDefinition<TServices[TName]> {
-      return makeServiceProxy(identifier as string, this.session, control) as RemoteServiceDefinition<
-        TServices[TName]
-      >;
-    }
+  _logger?.info(`Peer ${String(identifier)} attached`);
+  emitter.emit("peer-connected", connection);
+  return connection as unknown as PeerConnection<TServices>;
+}
 
-    /**
-     * Make a callback handle that can be manually released, or disposed out of scope.
-     * This is useful for long-lived callbacks, like event handlers.
-     */
-    callback<T extends Function>(fn: T): CallbackHandle<T> {
-      if (typeof fn !== "function")
-        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
-      if (Session.serialize in fn)
-        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Function is already bound as a callback handle");
+export async function detach(identifier: PeerIdentifier, kill: boolean = false): Promise<void> {
+  const connection = peers.get(identifier);
+  if (!connection) return;
 
-      return this.session.proxy(fn);
-    }
+  // `close()` triggers `session.terminate`, which fires the `terminate` listener
+  // registered in `attach()`. That listener removes the entry from `peers` and
+  // emits `peer-disconnected`, so we don't need to do either of those here.
+  await connection.close("detached", !kill);
+  _logger?.info(`Peer ${String(identifier)} detached`);
+}
 
-    /** Resolves to the value of a remote property. */
-    async get<TName extends keyof TServices, TProperty extends RemotablePropertyKeys<TServices[TName]>>(
-      name: TName,
-      property: TProperty,
-    ): Promise<TServices[TName][TProperty]> {
-      return this.session.get(name as string, property as string) as Promise<TServices[TName][TProperty]>;
-    }
+/** Resolve a peer connection by its identifier. */
+export function peer(identifier: PeerIdentifier): PeerConnection | undefined {
+  return peers.get(identifier);
+}
 
-    /**
-     * Sends a unary RPC request to the remote service. Supporting both spread and explicit array arguments.
-     */
-    call(service: string, method: string, ...args: unknown[]): Promise<unknown>;
-    call(service: string, method: string, args: unknown[], options?: RequestControl): Promise<unknown>;
-    call(service: string, method: string, ...rest: unknown[]): Promise<unknown> {
-      const [args, options] = splitArgsAndOptions(rest);
-      return this.session.request(service, method, args, options);
-    }
+// --------- PUBLIC API: SERVICE REGISTRATION --------- //
 
-    /**
-     * Open a server-streaming call. The returned iterator yields chunks as
-     * they arrive from the remote service.
-     */
-    stream(service: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown>;
-    stream(
-      service: string,
-      method: string,
-      args: unknown[],
-      options?: RequestControl,
-    ): AsyncIterableIterator<unknown>;
-    stream(service: string, method: string, ...rest: unknown[]): AsyncIterableIterator<unknown> {
-      const [args, options] = splitArgsAndOptions(rest);
-      return this.session.stream(service, method, args, options);
-    }
+type AnyFn = (...args: any[]) => any;
+type AnyCtor = new (...args: any[]) => any;
+type NonFunctionValue<T> = T extends AnyFn ? never : T extends AnyCtor ? never : T;
 
-    async close(reason?: string, graceful: boolean = true): Promise<void> {
-      await this.session.close(reason, graceful).catch(() => {});
-      this.cached.clear();
-    }
-  }
+type Constructor<T = unknown, Args extends unknown[] = unknown[]> = new (...args: Args) => T;
+type Factory<T = unknown> = (...args: unknown[]) => T;
 
-  /** Maps a `PeerConnection<Registry>` to the remote registry type. */
-  export type InferServiceRegistry<T> = T extends PeerConnection<infer R> ? R : never;
+declare const TokenType: unique symbol;
+export type Token<T = unknown> = string & {
+  readonly [TokenType]: T;
+};
 
-  export interface QuiryEvents {
-    "peer-connected": [handle: PeerConnection];
-    "peer-disconnected": [handle: PeerConnection, reason?: string];
-    shutdown: [reason?: string];
-    error: [error: Error];
-  }
+/**
+ * Service lifetime enumeration. Defines how long a service instance
+ * should live and when it should be created.
+ */
+export enum ServiceLifetime {
+  /**
+   * Creates a new instance every time the service is resolved.
+   * Use for stateless services or when you need fresh instances.
+   */
+  Transient = "transient",
 
-  export interface AttachOptions<TIdentifier extends PeerIdentifier = PeerIdentifier> {
-    readonly identifier?: TIdentifier;
+  /**
+   * Creates one instance for the entire application lifetime.
+   * Use for expensive-to-create services or shared state.
+   */
+  Singleton = "singleton",
+}
+
+export interface ServiceHooks<T = unknown> {
+  /** Hook called after the service instance is created. */
+  activated?: (instance: T) => void | PromiseLike<void>;
+  /** Hook called when the service instance is being disposed. */
+  disposed?: (instance: T) => void | PromiseLike<void>;
+}
+
+export interface ServiceOptions<T = unknown> {
+  /**
+   * The lifetime of the service instance
+   * @default ServiceLifetime.Transient
+   */
+  lifetime?: ServiceLifetime;
+  /**
+   * Allows the service registration to override an existing service
+   * bound to the same token. Use with caution!
+   */
+  override?: true;
+}
+
+export type ServiceOf<T> = T extends ServiceDescriptor<infer TService> ? TService : never;
+
+export type ServiceDefinition<T> =
+  | { type: "value"; value: T }
+  | { type: "factory"; builder: Factory<T> }
+  | {
+      type: "ctor";
+      ctor: Constructor<T>;
+      /** List of constructor parameters required by this service */
+      dependencies?: unknown[];
+    };
+
+/**
+ * Internal service descriptor containing all information about a registered service.
+ * @template T - The type of service this descriptor represents
+ */
+export interface ServiceDescriptor<T = any> {
+  /** Unique identifier for the service. */
+  readonly token: Token<T>;
+  /** Definition of the service */
+  definition: ServiceDefinition<T>;
+  /** Configuration options for the service */
+  options: Required<ServiceOptions<T>> & ServiceHooks<T>;
+}
+
+/**
+ * Base error class for all dependency injection related errors.
+ */
+export class DependencyInjectionError extends Error {
+  constructor(
+    message: string,
+    /** The service identifier that caused the error (if applicable) */
+    readonly identifier?: Token,
+  ) {
+    super(message);
+    this.name = this.constructor.name;
+    Error.captureStackTrace?.(this, DependencyInjectionError);
   }
 }
 
-namespace Quiry {
-  let _logger: Logger | null = null;
+type ExposeOptions<T> = ServiceOptions<T> & ServiceHooks<T>;
 
-  const peers = new Map<PeerIdentifier, PeerConnection>();
-  const emitter = new EventEmitter<QuiryEvents>();
-  const services = new Map<string, ServiceImpl>();
+export function expose<Ctor extends AnyCtor, K extends Token<InstanceType<Ctor>> | string>(
+  token: K,
+  ctor: Ctor,
+  options?: ExposeOptions<InstanceType<Ctor>> & { dependencies?: ConstructorParameters<Ctor> },
+): ServiceDescriptor<InstanceType<Ctor>>;
 
-  /**
-   * Install a logger sink. Pass `null` to disable logging.
-   * Logger is consulted by every active session and by the namespace itself.
-   */
-  export function setLogger(logger: Logger | null): void {
-    _logger = logger;
+export function expose<F extends AnyFn, K extends Token<ReturnType<F>> | string>(
+  token: K,
+  builder: F,
+  options?: ExposeOptions<ReturnType<F>>,
+): ServiceDescriptor<ReturnType<F>>;
+
+export function expose<T, K extends Token<T> | string>(
+  token: K,
+  value: NonFunctionValue<T>,
+  options?: Omit<ExposeOptions<T>, "lifetime">,
+): ServiceDescriptor<T>;
+
+export function expose<T>(
+  token: Token<T>,
+  impl: T,
+  options?: ExposeOptions<T> & { dependencies?: unknown[] },
+): ServiceDescriptor {
+  let definition: ServiceDefinition<T>;
+  if (descriptors.has(token)) {
+    if (options?.override) descriptors.delete(token);
+    else throw new DependencyInjectionError("Service already registered", token);
   }
 
-  // --------- PUBLIC API: PERSISTENCE --------- //
+  const defaults: ServiceOptions<T> = {
+    lifetime: ServiceLifetime.Transient,
+  };
 
-  /** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
-  export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
-    const subprocess = NJSFork(filename, options);
-    return attach(new ChildProcessTransport({ child: subprocess }));
+  // Determine if second parameter is a constructor or service options
+  if (typeof impl === "function") {
+    if (/^class\s/.test(Function.prototype.toString.call(impl))) {
+      definition = {
+        type: "ctor",
+        ctor: impl as Constructor<T>,
+        dependencies: options?.dependencies,
+      };
+    } else definition = { type: "factory", builder: impl as Factory<T> };
+  } else if (typeof impl === "object" && impl !== null) {
+    Object.assign(defaults, { lifetime: ServiceLifetime.Singleton }); // Value services are always singletons
+    definition = { type: "value", value: impl };
+  } else {
+    throw new DependencyInjectionError("Service registry requires an implementation", token);
   }
 
-  /** Spawns a worker thread at `filename` and attaches it as a new peer via {@link WorkerThreadsTransport}. */
-  export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
-    const worker = new NJSWorker(filename, options);
-    return attach(new WorkerThreadsTransport({ worker }));
+  const descriptor: ServiceDescriptor<T> = {
+    token: token,
+    definition,
+    options: { ...defaults, ...options } as typeof descriptor.options,
+  };
+
+  descriptors.set(token, descriptor);
+  return descriptor;
+}
+
+/**
+ * Resolve a service instance.
+ * This is the main method for getting service instances from the container.
+ *
+ * @throws A {@link DependencyInjectionError} if the service is not registered.
+ */
+export function get<T>(token: Token<T>): T;
+export function get<T = unknown>(identifier: string): T;
+export function get<T>(key: Token<T> | string): T {
+  return resolveService<T>(key as Token<T>);
+}
+
+/**
+ * Resolve a service instance by its token or identifier.
+ * @returns The service instance or null if the service is not registered.
+ */
+export function find<T>(token: Token<T>): T | null;
+export function find<T = unknown>(identifier: string): T | null;
+export function find<T>(key: Token<T> | string): T | null {
+  try {
+    return resolveService<T>(key as Token<T>);
+  } catch (error: unknown) {
+    if (error instanceof DependencyInjectionError) return null;
+    throw error;
+  }
+}
+
+/** Check if a service is registered. */
+export function has(key: Token | string): boolean {
+  return descriptors.has(key as Token);
+}
+
+export function dispose(key: Token | string): boolean {
+  const token = key as Token;
+  const instance = instances.get(token);
+  if (!instance) return false;
+
+  const descriptor = descriptors.get(token)!;
+  if (descriptor.options.disposed) {
+    void descriptor.options.disposed(instances.get(token));
   }
 
-  export function attach<
-    TIdentifier extends PeerIdentifier = PeerIdentifier,
-    TServices extends ServiceRegistry = GlobalServiceRegistry[TIdentifier],
-  >(
-    transport: Transport<AnyPacket>,
-    options?: AttachOptions<TIdentifier>,
-  ): PeerConnection<TIdentifier, TServices>;
+  return instances.delete(token);
+}
 
-  export function attach<TServices extends ServiceRegistry>(
-    transport: Transport<AnyPacket>,
-    options?: AttachOptions,
-  ): PeerConnection<PeerIdentifier, TServices>;
+export function clear(): void {
+  const disposed = new Set<Token>();
 
-  export function attach(transport: Transport<AnyPacket>, options: AttachOptions = {}): PeerConnection {
-    const identifier = options.identifier ?? randomBytes(4).toString("hex");
-    if (peers.has(identifier)) {
-      throw new QuiryError(
-        WireStatus.FAILED_PRECONDITION,
-        `Peer with identifier ${String(identifier)} already registered`,
-      );
+  // Dispose singletons
+  for (const [token, singleton] of instances) {
+    if (!disposed.has(token)) {
+      const descriptor = descriptors.get(token);
+      if (descriptor?.options.disposed) {
+        void descriptor.options.disposed(singleton);
+      }
+      disposed.add(token);
     }
+  }
 
-    const session = new Session(transport, inquiry, {}, _logger).open();
-    const connection = new PeerConnection(identifier, session);
-    peers.set(identifier, connection);
+  // Clear descriptors
+  descriptors.clear();
+  instances.clear();
+}
 
-    session.on(
-      "terminate",
-      (reason?: string) => {
-        if (peers.delete(identifier)) {
-          emitter.emit("peer-disconnected", connection, reason);
-          _logger?.info(`Peer ${String(identifier)} disconnected`);
-        }
-      },
-      { once: true },
+// --------- INTERNAL --------- //
+
+/**
+ * Internal method for resolving services. Handles the core resolution logic
+ * including lifecycle management.
+ */
+function resolveService<T>(token: Token<T>): T {
+  const descriptor = descriptors.get(token);
+  if (!descriptor) {
+    throw new DependencyInjectionError("Service not registered", token);
+  }
+
+  switch (descriptor.options.lifetime) {
+    case ServiceLifetime.Singleton:
+      if (instances.has(token)) return instances.get(token);
+  }
+
+  let instance: T;
+
+  // Create instance based on definition
+  switch (descriptor.definition.type) {
+    case "value":
+      instance = descriptor.definition.value;
+      break;
+    case "factory":
+      instance = descriptor.definition.builder();
+      break;
+    case "ctor":
+      instance = new descriptor.definition.ctor(...(descriptor.definition.dependencies ?? []));
+      break;
+    default:
+      throw new DependencyInjectionError("Invalid service definition", token);
+  }
+
+  // Call activation hook
+  if (descriptor.options.activated) {
+    void descriptor.options.activated(instance);
+  }
+
+  // Store based on lifetime
+  switch (descriptor.options.lifetime) {
+    case ServiceLifetime.Singleton:
+      instances.set(token, instance);
+      break;
+  }
+
+  return instance;
+}
+
+function handleInquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
+  const context = {
+    detail: { query: { service: request.service, property: request.property } },
+  };
+
+  const impl = find<ServiceImpl>(request.service);
+  if (!impl) throw new QuiryError(WireStatus.NOT_FOUND, `Service ${request.service} not found`, context);
+  if (!(request.property in impl)) {
+    throw new QuiryError(
+      WireStatus.NOT_FOUND,
+      `Property ${request.property} does not exist in service ${request.service}`,
+      context,
     );
-
-    _logger?.info(`Peer ${String(identifier)} attached`);
-    emitter.emit("peer-connected", connection);
-    return connection;
   }
 
-  export async function detach(identifier: PeerIdentifier, kill: boolean = false): Promise<void> {
-    const connection = peers.get(identifier);
-    if (!connection) return;
-
-    // `close()` triggers `session.terminate`, which fires the `terminate` listener
-    // registered in `attach()`. That listener removes the entry from `peers` and
-    // emits `peer-disconnected`, so we don't need to do either of those here.
-    await connection.close("detached", !kill);
-    _logger?.info(`Peer ${String(identifier)} detached`);
-  }
-
-  export function get(identifier: PeerIdentifier): PeerConnection | undefined {
-    return peers.get(identifier);
-  }
-
-  // --------- PUBLIC API: SERVICES --------- //
-
-  export function expose<TName extends string, TImpl extends ServiceImpl>(name: TName, impl: TImpl): void {
-    if (services.has(name))
-      throw new QuiryError(WireStatus.FAILED_PRECONDITION, `Service ${name} already exposed`);
-    if (typeof impl !== "object" || impl === null || Array.isArray(impl))
-      throw new QuiryError(WireStatus.INVALID_ARGUMENT, `Service ${name} must be an object`);
-
-    services.set(name, impl);
-  }
-
-  export function conceal<TName extends string>(name: TName): boolean {
-    return services.delete(name);
-  }
-
-  function inquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
-    const context = {
-      detail: { query: { service: request.service, property: request.property } },
-    };
-
-    const impl = services.get(request.service);
-    if (!impl) throw new QuiryError(WireStatus.NOT_FOUND, `Service ${request.service} not found`, context);
-    if (!(request.property in impl)) {
+  const prop = impl[request.property as keyof typeof impl] as unknown;
+  // Property GET — key exists but is not a function
+  if (typeof prop !== "function") {
+    if (!isSerializable(prop)) {
       throw new QuiryError(
-        WireStatus.NOT_FOUND,
-        `Property ${request.property} does not exist in service ${request.service}`,
+        WireStatus.MALFORMED_RESPONSE,
+        "Property value is not serializable and cannot be retrieved",
         context,
       );
     }
 
-    const prop = impl[request.property as keyof typeof impl] as unknown;
-    // Property GET — key exists but is not a function
-    if (typeof prop !== "function") {
-      if (!isSerializable(prop)) {
-        throw new QuiryError(
-          WireStatus.MALFORMED_RESPONSE,
-          "Cannot get a non-serializable property",
-          context,
-        );
-      }
+    return Promise.resolve(prop);
+  }
 
-      return Promise.resolve(prop);
-    }
+  _logger?.trace(
+    `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
+  );
 
-    _logger?.trace(
-      `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
+  let result: unknown;
+  try {
+    result = prop.apply(impl, request.args as unknown[]);
+  } catch (error: unknown) {
+    return Promise.reject(
+      new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
     );
-
-    let result: unknown;
-    try {
-      result = prop.apply(impl, request.args as unknown[]);
-    } catch (error: unknown) {
-      return Promise.reject(
-        new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
-      );
-    }
-
-    if (typeof result === "object" && result !== null) {
-      if (isAnyIterableIterator(result)) return result;
-      if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
-    }
-
-    return Promise.resolve(result);
   }
 
-  export function on<K extends keyof QuiryEvents>(
-    event: K,
-    listener: (...args: QuiryEvents[K]) => void,
-  ): Unsubscribe {
-    emitter.on(event, listener as (...args: unknown[]) => void);
-    return () => emitter.off(event, listener as (...args: unknown[]) => void);
-  }
-}
-
-function makeServiceProxy(service: string, session: Session, control?: RequestControl): object {
-  const callerStack = captureCallerStack(makeServiceProxy);
-
-  return new Proxy(Object.create(null), {
-    get(_, key: string) {
-      // Only created when .then/.catch/.finally is accessed (lazy),
-      // i.e. when the developer writes `await proxy.name` without calling it
-      let getter: Promise<unknown> | null = null;
-      const opt = (): Promise<unknown> => {
-        return (getter ??= session.get(service, key).catch((error: unknown) => {
-          attachCallerStack(error, callerStack);
-          return Promise.reject(error);
-        }));
-      };
-
-      return new Proxy(function () {} as unknown as object, {
-        apply(_, __, args: unknown[]) {
-          return makeCallOrStream(service, key, args, session, control, callerStack);
-        },
-        get(_, prop) {
-          switch (prop) {
-            case "then":
-              return <TResult1 = unknown, TResult2 = never>(
-                onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
-                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-              ): Promise<TResult1 | TResult2> => opt().then(onfulfilled, onrejected);
-
-            case "catch":
-              return <TResult = never>(
-                onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null,
-              ): Promise<unknown | TResult> => opt().catch(onrejected);
-
-            case "finally":
-              return (onfinally?: (() => void) | undefined | null): Promise<unknown> =>
-                opt().finally(onfinally);
-
-            default:
-              throw new QuiryError(
-                WireStatus.FAILED_PRECONDITION,
-                "Remote properties must be used with `await` keyword",
-              );
-          }
-        },
-      });
-    },
-    set() {
-      throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Remote properties are read-only");
-    },
-  });
-}
-
-/**
- * A lazy handle returned by the service proxy that commits to either a
- * unary request or a server-stream on first use.
- *
- * The two paths are mutually exclusive: whichever protocol the caller engages
- * first wins, and subsequent attempts to use the other interface throw.
- */
-interface CallOrStream<T = unknown>
-  extends PromiseLike<T>,
-    AsyncIterableIterator<T extends AsyncIterable<infer C> ? C : T> {}
-
-enum QueryMode {
-  PENDING = 0,
-  CALL,
-  STREAM,
-}
-
-function makeCallOrStream<T = unknown>(
-  service: string,
-  method: string,
-  args: unknown[],
-  session: Session,
-  control?: RequestControl,
-  stack?: string,
-): CallOrStream<T> {
-  let mode: QueryMode = QueryMode.PENDING;
-  let call: Promise<unknown>;
-  let iter: AsyncIterableIterator<unknown>;
-
-  const tag = <E>(error: E): E => {
-    if (stack) attachCallerStack(error, stack);
-    return error;
-  };
-
-  const run = (): Promise<unknown> => {
-    if (mode === QueryMode.STREAM)
-      throw new Error(`Cannot await ${service}.${method}(...) — it has already been committed as a stream.`);
-
-    mode = QueryMode.CALL;
-    return (call ??= session
-      .request(service, method, args, control)
-      .catch((error: unknown) => Promise.reject(tag(error))));
-  };
-
-  const flow = (): AsyncIterableIterator<unknown> => {
-    if (mode === QueryMode.CALL)
-      throw new Error(
-        `Cannot iterate ${service}.${method}(...) — it has already been committed as a unary call.`,
-      );
-
-    mode = QueryMode.STREAM;
-    if (iter) return iter;
-
-    const source = session.stream(service, method, args, control);
-    iter = {
-      [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
-        return this;
-      },
-      next: (...x): Promise<IteratorResult<unknown>> =>
-        source.next(...x).catch((error: unknown) => Promise.reject(tag(error))),
-      return: (value?: unknown): Promise<IteratorResult<unknown>> =>
-        source.return ? source.return(value) : Promise.resolve({ value: undefined, done: true }),
-      throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
-        source.throw ? source.throw(err) : Promise.reject(err),
-    };
-    return iter;
-  };
-
-  // Auto-trigger to call mode if no stream was engaged.
-  //! I'm assuming this is risky in terms of semantic predictability...
-  //! While its technically safe, it's behaviorally fragile; race conditions may occur in async-delayed use.
-  // TODO: decide on a better solution, or perhaps work around it with proper documentation.
-  queueMicrotask(() => mode === QueryMode.PENDING && run());
-
-  // This object is deliberately awaitable so `proxy.method(...)` routes through the unary call path.
-  return {
-    // biome-ignore lint/suspicious/noThenProperty: intentional
-    then: <TResult1 = unknown, TResult2 = never>(
-      onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
-      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-    ): Promise<TResult1 | TResult2> => run().then(onfulfilled, onrejected),
-    catch: <TResult = never>(
-      onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null,
-    ): Promise<unknown | TResult> => run().catch(onrejected),
-    finally: (onfinally?: (() => void) | undefined | null): Promise<unknown> => run().finally(onfinally),
-
-    [Symbol.iterator]: (): IterableIterator<unknown> => {
-      throw new QuiryError(
-        WireStatus.FAILED_PRECONDITION,
-        "Remote iterators must be used with `await` keyword",
-      );
-    },
-    [Symbol.asyncIterator]: (): AsyncIterableIterator<unknown> => flow(),
-    next: (...x): Promise<IteratorResult<unknown>> => flow().next(...x),
-
-    // If the stream was never engaged, there's nothing to clean up.
-    return: (value?: unknown): Promise<IteratorResult<unknown>> =>
-      mode === QueryMode.STREAM && iter?.return
-        ? iter.return(value)
-        : Promise.resolve({ value: undefined, done: true }),
-    throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
-      mode === QueryMode.STREAM && iter?.throw ? iter.throw(err) : Promise.reject(err),
-  } as CallOrStream<T>;
-}
-
-const REQUEST_CONTROL_KEYS = new Set(["timeout", "retry", "abortable", "traceId"]);
-
-/**
- * Peels off a trailing {@link RequestControl} object from the variadic `rest` array.
- *
- * To minimize the chance of a regular argument being mistaken for control options,
- * we only treat the last element as control if it's a plain object whose keys are
- * a non-empty subset of {@link REQUEST_CONTROL_KEYS}. An empty object or any
- * unknown key disqualifies it.
- */
-function splitArgsAndOptions(rest: unknown[]): [unknown[], RequestControl | undefined] {
-  if (rest.length === 0) return [rest, undefined];
-
-  const tail = rest[rest.length - 1];
-  if (!tail || typeof tail !== "object" || Array.isArray(tail)) return [rest, undefined];
-
-  const proto = Object.getPrototypeOf(tail);
-  if (proto !== Object.prototype && proto !== null) return [rest, undefined];
-
-  const keys = Object.keys(tail);
-  if (keys.length === 0 || !keys.every((k) => REQUEST_CONTROL_KEYS.has(k))) {
-    return [rest, undefined];
+  if (typeof result === "object" && result !== null) {
+    if (isAnyIterableIterator(result)) return result;
+    if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
   }
 
-  return [rest.slice(0, -1), tail as RequestControl];
+  return Promise.resolve(result);
 }
 
-export * from "./internal";
-export { QuiryError } from "./shared/errors";
-export default Quiry;
+export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
+export type { RetryPolicy, RequestControl } from "./interface/protocol";

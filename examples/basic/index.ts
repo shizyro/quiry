@@ -1,4 +1,4 @@
-import Quiry from "~/";
+import * as Quiry from "~/";
 
 import { isMainThread } from "node:worker_threads";
 import { openSync, readSync, closeSync } from "node:fs";
@@ -21,6 +21,12 @@ class MathService {
 
   multiply(a: number, b: number): number {
     return a * b;
+  }
+
+  threshold(min: number) {
+    return (value: number): boolean => {
+      return value >= min;
+    };
   }
 
   *prime(start: number = 2): Generator<number> {
@@ -54,7 +60,7 @@ class EventService {
     listener: (...args: ExampleEvents[TEventName]) => void,
   ) {
     this.emitter.on(event, listener);
-    return () => this.emitter.off(event, listener);
+    return () => void this.emitter.off(event, listener);
   }
 
   emit<TEventName extends keyof ExampleEvents>(
@@ -66,8 +72,10 @@ class EventService {
 }
 
 class FileService {
+  constructor(private readonly root: string) {}
+
   open(path: string) {
-    const handle = openSync(join(__dirname, path), "r");
+    const handle = openSync(join(this.root, path), "r");
     return {
       read: (n: number) => {
         const buffer = Buffer.alloc(n);
@@ -93,15 +101,25 @@ export type ExampleRegistry = {
 };
 
 async function bootstrap() {
+  // constructor pattern
+  Quiry.expose("greeter", GreeterService, {
+    lifetime: Quiry.ServiceLifetime.Singleton,
+  });
+  Quiry.expose("file", FileService, { dependencies: [__dirname] });
+
+  // value pattern
   Quiry.expose("math", new MathService());
-  Quiry.expose("greeter", new GreeterService());
-  Quiry.expose("events", new EventService());
-  Quiry.expose("file", new FileService());
   Quiry.expose("timer", {
     async delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T> {
       await new Promise((resolve) => setTimeout(resolve, ms));
       return handler(1, 2, 3);
     },
+  });
+
+  // factory pattern
+  Quiry.expose("events", () => new EventService(), {
+    lifetime: Quiry.ServiceLifetime.Singleton,
+    // must be singleton so later emitted events are not pushed into new instances
   });
 
   Quiry.spawn(join(__dirname, "worker.ts"));

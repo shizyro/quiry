@@ -1,4 +1,4 @@
-import Quiry, { WorkerThreadsTransport } from "~/";
+import * as Quiry from "~/";
 import type { ExampleRegistry } from "./index";
 
 function log(...data: any[]) {
@@ -6,7 +6,7 @@ function log(...data: any[]) {
 }
 
 async function main() {
-  const peer = Quiry.attach<ExampleRegistry>(new WorkerThreadsTransport());
+  const peer = Quiry.attach<ExampleRegistry>(new Quiry.WorkerThreadsTransport());
   void peer.service("greeter").greet("World");
 
   const math = peer.service("math");
@@ -21,12 +21,12 @@ async function main() {
     received.push(number);
     if (number > 100) break;
   }
-  log(`Stream results: [${received.splice(0, 3).join(", ")}, ..., ${received.splice(-3).join(", ")}]`);
+  log(`Stream results: [${received.slice(0, 3).join(", ")}, ..., ${received.slice(-3).join(", ")}]`);
 
   // support for functional arguments
   void peer.service("timer").delay(() => {
     log("Hello, from the other side! One second later!");
-  }, 1000); // callbacks are automatically "released" on the remote side after invocation
+  }, 1000); // inline callbacks are released when the remote call settles
 
   const events = peer.service("events");
   log(`Event names: ${await events.eventNames}`); // remote getters
@@ -41,8 +41,14 @@ async function main() {
   // once they are garbage collected on this side (caller).
   const unsubscribe = await events.on("foo", handle);
 
-  // ... also supports functions that are deeply nested in return values.
-  const file = await peer.service("file").open("data.txt");
+  const predicate = await peer.service("math").threshold(50);
+  const scores = [15, 42, 68, 91, 33];
+  const results = await Promise.all(scores.map(predicate));
+  const filtered = scores.filter((_, index) => results[index]);
+  log(scores, "->", filtered);
+
+  // ... also supports functions that are deeply nested in return values
+  const file = await peer.service("file", { timeout: 1000 }).open("data.txt"); // controlled services
   log("\n\t", await file.read(123));
   await file.close();
 

@@ -12,8 +12,8 @@ interface LeveledLogMethod {
   (infoObject: object): Logger;
 }
 
-type Serializable = string | object | number | boolean | bigint;
-type Primitive = string | number | boolean | null | undefined;
+type Primitive = string | number | boolean | bigint | null | undefined;
+type Serializable = Primitive | readonly Serializable[] | { readonly [key: string]: Serializable };
 
 type DeepRequired<T> = Required<{
   [K in keyof T]: T[K] extends Required<T[K]> ? T[K] : DeepRequired<T[K]>;
