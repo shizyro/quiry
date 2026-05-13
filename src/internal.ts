@@ -4,6 +4,7 @@ import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/erro
 import type { ServiceRegistry, ServiceImpl } from "./interface/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
 import { WireStatus, type RequestControl } from "./interface/protocol";
+import { isPromiseLike } from "./lib/helpers";
 
 export type PeerIdentifier = string;
 
@@ -127,8 +128,12 @@ function makeServiceProxy(service: string, session: Session, control?: RequestCo
         },
       });
     },
-    set() {
-      throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Remote properties are read-only");
+    set(_, key: string, value: unknown): boolean {
+      (async () => {
+        // Trigger async side effects without awaiting
+        await session.set(service, key, await value);
+      })();
+      return true;
     },
   });
 }

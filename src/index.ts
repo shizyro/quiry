@@ -389,39 +389,79 @@ function handleInquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
     );
   }
 
-  const prop = impl[request.property as keyof typeof impl] as unknown;
-  // Property GET — key exists but is not a function
-  if (typeof prop !== "function") {
-    if (!isSerializable(prop)) {
-      throw new QuiryError(
-        WireStatus.MALFORMED_RESPONSE,
-        "Property value is not serializable and cannot be retrieved",
-        context,
-      );
+  switch (request.method) {
+    case "set": {
+      const descriptor = Object.getOwnPropertyDescriptor(impl, request.property);
+      if (!descriptor) {
+        throw new QuiryError(
+          WireStatus.NOT_FOUND,
+          `Property ${request.property} does not exist in service ${request.service}`,
+          context,
+        );
+      }
+
+      // There is no reliable way to check if a property is readonly (TS), so as best-effort,
+      // we just check if the descriptor is writable and if the set accessor is not a function.
+
+      // Although, the typing system does produce a compile-time error. This doesn't proof anything,
+      // but it's a good enough approximation.
+
+      if (
+        ("writable" in descriptor ? descriptor.writable !== true : typeof descriptor.set !== "function") ||
+        typeof descriptor.value === "function"
+        // Object.isFrozen(impl[request.property as keyof typeof impl])
+      ) {
+        throw new QuiryError(
+          WireStatus.FAILED_PRECONDITION,
+          `Property ${request.property} is not writable`,
+          context,
+        );
+      }
+
+      _logger?.trace(`Setting property ${request.property} to ${request.value}`);
+
+      return new Promise((resolve) => {
+        (impl as { [request.property]: unknown })[request.property] = request.value;
+        resolve(true);
+      });
     }
 
-    return Promise.resolve(prop);
+    case "get": {
+      const prop = impl[request.property as keyof typeof impl] as unknown;
+      // Property GET — key exists but is not a function
+      if (typeof prop !== "function") {
+        if (!isSerializable(prop)) {
+          throw new QuiryError(
+            WireStatus.MALFORMED_RESPONSE,
+            "Property value is not serializable and cannot be retrieved",
+            context,
+          );
+        }
+
+        return Promise.resolve(prop);
+      }
+
+      _logger?.trace(
+        `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
+      );
+
+      let result: unknown;
+      try {
+        result = prop.apply(impl, request.args as unknown[]);
+      } catch (error: unknown) {
+        return Promise.reject(
+          new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
+        );
+      }
+
+      if (typeof result === "object" && result !== null) {
+        if (isAnyIterableIterator(result)) return result;
+        if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
+      }
+
+      return Promise.resolve(result);
+    }
   }
-
-  _logger?.trace(
-    `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
-  );
-
-  let result: unknown;
-  try {
-    result = prop.apply(impl, request.args as unknown[]);
-  } catch (error: unknown) {
-    return Promise.reject(
-      new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
-    );
-  }
-
-  if (typeof result === "object" && result !== null) {
-    if (isAnyIterableIterator(result)) return result;
-    if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
-  }
-
-  return Promise.resolve(result);
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };

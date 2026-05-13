@@ -21,11 +21,32 @@ import { randomBytes } from "node:crypto";
 export type InquiryFunc = (
   request: InquiryRequest,
 ) => Promise<unknown> | AsyncIterableIterator<unknown> | IterableIterator<unknown>;
-export type InquiryRequest = Readonly<{
-  service: string;
-  property: string;
-  args: ReadonlyArray<unknown>;
-}>;
+export type InquiryMethod = "get" | "set";
+// biome-ignore format: compact.
+export type InquiryRequest = Readonly<
+  {
+    service: string;
+    property: string;
+  } & ({
+    method: "get";
+    args: ReadonlyArray<unknown>;
+  } | {
+    method: "set";
+    readonly value: unknown;
+  })
+>;
+
+interface PendingGetRequest<T = unknown> {
+  readonly kind: "get";
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+}
+
+interface PendingSetRequest<T = unknown> {
+  readonly kind: "set";
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
 
 interface PendingCallRequest<T = unknown> {
   readonly kind: "call";
@@ -43,11 +64,7 @@ interface PendingStreamRequest {
   seq: number;
 }
 
-interface PendingGetRequest<T = unknown> {
-  readonly kind: "get";
-  resolve: (value: T) => void;
-  reject: (error: Error) => void;
-}
+type PendingRequest = PendingGetRequest | PendingSetRequest | PendingCallRequest | PendingStreamRequest;
 
 /**
  * Producer-side state for an in-flight streaming response. Tracks the flow
@@ -210,10 +227,7 @@ export class Session {
   private readonly outbound = new InFlightTracker();
   private readonly callbacks = new CallbackRegistry();
 
-  readonly #pending_requests = new Map<
-    CorrelationId,
-    PendingCallRequest | PendingStreamRequest | PendingGetRequest
-  >();
+  readonly #pending_requests = new Map<CorrelationId, PendingRequest>();
   readonly #outbound_streams = new Map<CorrelationId, OutboundStream>();
 
   readonly #inflight_invocations = new Map<CorrelationId, number>();
@@ -523,6 +537,58 @@ export class Session {
   }
 
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
+
+  async set(service: string, property: string, value: unknown): Promise<true> {
+    if (this.#state !== SessionState.OPEN) {
+      throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
+    }
+
+    const correlation = Session.correlate();
+    const substitute = this.callbacks.substitute(Session.unwrapSerialized(value), correlation);
+    if (!isSerializable(substitute))
+      throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Value is not serializable");
+
+    const body = {
+      id: correlation,
+      kind: WireKind.REQUEST,
+      type: Packets.RequestMessageType.SET,
+      timestamp: Date.now(),
+      payload: { service, property, value: substitute },
+    } satisfies Packets.SetRequestPacket;
+
+    return new Promise((resolve, reject) => {
+      const cleanup = (): void => {
+        if (this.#pending_requests.delete(correlation)) this.outbound.exit();
+      };
+
+      this.#pending_requests.set(correlation, {
+        kind: "set",
+        resolve: (): void => {
+          cleanup();
+          resolve(true);
+        },
+        reject: (error: Error): void => {
+          cleanup();
+          reject(error);
+        },
+      });
+
+      this.outbound.enter();
+
+      Promise.resolve(this.forward(body)).catch((cause: unknown) => {
+        this.logger?.warn(
+          `Failed to send packet ${clip(body.id)}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        cleanup();
+        reject(
+          new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", {
+            correlationId: correlation,
+            cause,
+          }),
+        );
+      });
+    });
+  }
 
   async get(service: string, property: string): Promise<unknown> {
     if (this.#state !== SessionState.OPEN) {
@@ -1007,14 +1073,18 @@ export class Session {
         });
       }
 
-      // dispatch the request to the event listener
+      // dispatch the request to inquiry
       // TODO: maybe something like a semaphore to limit the number of concurrent requests
 
+      const setter = packet.type === Packets.RequestMessageType.SET;
       const request = {
+        method: setter ? "set" : "get",
         service: packet.payload.service,
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
-        args: "args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : [],
-      } satisfies InquiryRequest;
+        ...(setter
+          ? { value: packet.payload.value }
+          : { args: "args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : [] }),
+      } as unknown as InquiryRequest;
 
       let controller: AbortController | undefined;
       if ("control" in packet.payload && packet.payload.control?.abortable) {
