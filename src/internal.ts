@@ -4,7 +4,6 @@ import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/erro
 import type { ServiceRegistry, ServiceImpl } from "./interface/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
 import { WireStatus, type RequestControl } from "./interface/protocol";
-import { isPromiseLike } from "./lib/helpers";
 
 export type PeerIdentifier = string;
 
@@ -21,11 +20,17 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
   ): Remote<
     [TOverride] extends [never] ? (TName extends keyof TServices ? TServices[TName] : ServiceImpl) : TOverride
   > {
-    let proxy = this.cached.get(name);
-    if (!proxy) {
-      proxy = makeServiceProxy(name as string, this.session, control);
-      this.cached.set(name, proxy);
+    let proxy: Remote<unknown>;
+
+    if (control) proxy = makeServiceProxy(name, this.session, control);
+    else {
+      proxy = this.cached.get(name) as Remote<unknown>;
+      if (!proxy) {
+        proxy = makeServiceProxy(name, this.session);
+        this.cached.set(name, proxy);
+      }
     }
+
     // @ts-expect-error; ignore.
     return proxy;
   }

@@ -57,17 +57,23 @@ export class Router<T> {
         let consumed = false;
         for (const interceptor of this.#interceptors) {
           if (interceptor.predicate(value)) {
-            if (interceptor.handler(value)) {
-              consumed = true;
-              break;
+            try {
+              consumed = interceptor.handler(value);
+            } catch {
+              // ignore errors; so one faulty handler can't tear down the router.
             }
+            if (consumed) break;
           }
         }
 
         // passive listeners (lowest priority)
         for (const listener of this.#listeners) {
           if (listener.predicate(value)) {
-            listener.handler(value);
+            try {
+              listener.handler(value);
+            } catch {
+              // ignore; observable.
+            }
           }
         }
 

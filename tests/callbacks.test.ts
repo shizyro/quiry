@@ -212,7 +212,7 @@ describe("Session callbacks", () => {
       unsubscribe();
     });
 
-    it("invoking a stack-scoped callback after local release returns undefined to the proxy caller", async () => {
+    it("invoking a stack-scoped callback after local rejects with NOT_FOUND", async () => {
       const observations: unknown[] = [];
       pair = await openSessionPair({
         producerInquiry: async (req) => {
@@ -229,9 +229,7 @@ describe("Session callbacks", () => {
       const promise = pair.consumer.request("_", "_", [cb]);
       cb.release();
 
-      await promise;
-      // The proxy swallows rejections (NOT_FOUND) and resolves with undefined.
-      expect(observations).toEqual([undefined]);
+      await expect(promise).rejects.toMatchObject({ code: WireStatus.NOT_FOUND });
     });
 
     describe("invocation argument handling", () => {
@@ -268,25 +266,20 @@ describe("Session callbacks", () => {
         expect(received).toEqual({ ok: true, value: 7 });
       });
 
-      it("a callback that throws on the consumer side resolves the proxy with undefined (fire-and-forget)", async () => {
-        let received: unknown = "untouched";
+      it("a callback that throws on the consumer side rejects the proxy with the error", async () => {
         pair = await openSessionPair({
           producerInquiry: async (req) => {
             const cb = req.args[0] as () => Promise<unknown>;
-            // The proxy's outer `.catch` swallows wire-level errors and
-            // resolves with undefined. Tests on the producer side observe
-            // that resolution rather than re-throwing.
-            received = await cb();
-            return null;
+            return await cb();
           },
         });
 
-        await pair.consumer.request("_", "_", [
+        const promise = pair.consumer.request("_", "_", [
           () => {
             throw new Error("nope");
           },
         ]);
-        expect(received).toBeUndefined();
+        await expect(promise).rejects.toMatchObject({ message: "nope" });
       });
 
       it("the producer's outbound counter stays balanced when the callback returns", async () => {

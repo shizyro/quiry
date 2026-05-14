@@ -23,17 +23,14 @@ export type InquiryFunc = (
 ) => Promise<unknown> | AsyncIterableIterator<unknown> | IterableIterator<unknown>;
 export type InquiryMethod = "get" | "set";
 // biome-ignore format: compact.
-export type InquiryRequest = Readonly<
+export type InquiryRequest<Method extends InquiryMethod = "get"> = Readonly<
   {
+    method: Method;
     service: string;
     property: string;
-  } & ({
-    method: "get";
-    args: ReadonlyArray<unknown>;
-  } | {
-    method: "set";
-    readonly value: unknown;
-  })
+  } & (Method extends "get"
+    ? { args: ReadonlyArray<unknown> }
+    : { readonly value: unknown })
 >;
 
 interface PendingGetRequest<T = unknown> {
@@ -1058,7 +1055,7 @@ export class Session {
       if (
         "control" in packet.payload &&
         packet.payload.control?.timeout !== undefined &&
-        packet.timestamp >= Date.now() + packet.payload.control.timeout
+        Date.now() - packet.timestamp >= packet.payload.control.timeout
       ) {
         return await this.send<Packets.ValueResponsePacket>({
           kind: WireKind.RESPONSE,
@@ -1717,7 +1714,7 @@ export class Session {
       const eid = `${callback}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
 
       const timeout = scope === CallbackScope.SESSION ? null : this.config.defaultTimeout;
-      return new Promise<unknown>((resolve, reject) => {
+      const promise = new Promise<unknown>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         if (timeout !== null) {
           // Bound the pending yield with a deadline — a misbehaving peer
@@ -1772,13 +1769,17 @@ export class Session {
             }),
           );
         });
-      }).catch(() => {
+      });
+
+      promise.catch(() => {
         // Remote callbacks are frequently invoked in fire-and-forget contexts
         // where the caller never observes the return value. Attaching a silent fallback handler
         // marks the rejection as observed so the host process doesn't die from
         // `unhandledRejection` when the remote returns an error.
         this.logger?.debug(`Remote callback rejection (unobserved by default handler): ${clip(eid)}`);
       });
+
+      return promise;
     };
   }
 
