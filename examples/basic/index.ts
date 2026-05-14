@@ -101,14 +101,9 @@ export type ExampleRegistry = {
 };
 
 async function bootstrap() {
-  // constructor pattern
-  Quiry.expose("greeter", GreeterService, {
-    lifetime: Quiry.ServiceLifetime.Singleton,
-  });
-  Quiry.expose("file", FileService, { dependencies: [__dirname] });
-
-  // value pattern
+  Quiry.expose("greeter", new GreeterService());
   Quiry.expose("math", new MathService());
+
   Quiry.expose("timer", {
     async delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T> {
       await new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,11 +111,8 @@ async function bootstrap() {
     },
   });
 
-  // factory pattern
-  Quiry.expose("events", () => new EventService(), {
-    lifetime: Quiry.ServiceLifetime.Singleton,
-    // must be singleton so later emitted events are not pushed into new instances
-  });
+  Quiry.expose("file", () => new FileService(__dirname));
+  Quiry.expose("events", () => new EventService());
 
   Quiry.spawn(join(__dirname, "worker.ts"));
 }

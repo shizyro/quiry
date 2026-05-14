@@ -37,7 +37,7 @@ class MathService {
 }
 
 // expose a service with a unique identifier
-Quiry.expose("math", MathService);
+Quiry.expose("math", new MathService());
 
 export type ServiceRegistry = {
   math: MathService;
