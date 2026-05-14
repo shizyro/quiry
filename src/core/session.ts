@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 
 import { Router } from "../lib/router";
 import { AsyncQueue } from "../lib/queue";
-import { InFlightTracker } from "../lib/tracker";
+import { InFlightTracker, RefScopedTracker } from "../lib/tracker";
 
 import { TransportState, type Transport, type BackpressureSignal, type TransportError } from "./transport";
 
@@ -150,7 +150,7 @@ export interface SessionEvents {
 }
 
 /**
- * Bidirectional RPC session over a {@link Transport}: handshake, requests, streams, callbacks, and drain.
+ * Bidirectional RPC session over a {@link Transport}: requests, streams, callbacks, and drain.
  * Incoming routing runs on a {@link Router}; unhandled async errors in packet handlers shut the session down.
  */
 export class Session {
@@ -223,13 +223,18 @@ export class Session {
   private readonly inbound = new InFlightTracker();
   private readonly outbound = new InFlightTracker();
   private readonly callbacks = new CallbackRegistry();
+  /**
+   * Per-ref counter for in-flight callback work, spanning both inbound INVOKEs we're servicing
+   * locally and outbound INVOKEs we've issued and are awaiting RETURN for. {@link drainInflightInvocations}
+   * awaits zero on this tracker before letting RELEASE go out for the same ref.
+   */
+  private readonly invocations = new RefScopedTracker<CorrelationId>();
 
   readonly #pending_requests = new Map<CorrelationId, PendingRequest>();
   readonly #outbound_streams = new Map<CorrelationId, OutboundStream>();
 
-  readonly #inflight_invocations = new Map<CorrelationId, number>();
-  readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
+  readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
 
   private readonly finalization: FinalizationRegistry<CallbackId>;
   private readonly controllers = new Map<CorrelationId, AbortController>();
@@ -337,8 +342,8 @@ export class Session {
   // --------- PUBLIC API: LIFECYCLE --------- //
 
   /**
-   * Opens transport, performs system handshake, starts the receive {@link Router}.
-   * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `peering`, or handshake/deadline failures.
+   * Opens transport and starts the receive {@link Router}.
+   * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `closed`, or transport/router errors.
    */
   open() {
     if (this.#state !== SessionState.CLOSED)
@@ -363,7 +368,8 @@ export class Session {
 
   /**
    * Initiates a cooperative close. Graceful close runs the drain protocol (announces, quiesces,
-   * waits for peer ACK); non-graceful (or `peering` state) skips straight to `terminate`.
+   * waits for peer ACK); non-graceful skips straight to `terminate`.
+   *
    * Multiple concurrent calls collapse onto a single drain promise.
    */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
@@ -523,7 +529,7 @@ export class Session {
 
     // Clear callback registry (no RELEASE packets; transport is gone)
     this.callbacks.clear();
-    this.#inflight_invocations.clear();
+    this.invocations.drain();
 
     this.emitter.emit("state-change", SessionState.CLOSED, previous);
     this.emitter.emit("terminate", reason);
@@ -960,7 +966,7 @@ export class Session {
         break;
 
       case WireKind.SYSTEM:
-        // System packets are handled sequentially; ordering matters for handshake and drain.
+        // System packets are handled sequentially; ordering matters.
         attend(this.handleSystemPacket(packet));
         break;
 
@@ -1311,7 +1317,7 @@ export class Session {
     switch (packet.type) {
       case Packets.CallbackMessageType.INVOKE: {
         const { ref, eid, callback, args } = packet.payload;
-        if (ref) this.#inflight_invocations.set(ref, (this.#inflight_invocations.get(ref) ?? 0) + 1);
+        if (ref) this.invocations.enter(ref);
 
         const fn = this.callbacks.get(callback);
         const context = { correlationId: ref ?? undefined };
@@ -1366,12 +1372,7 @@ export class Session {
             );
           });
         } finally {
-          if (ref) {
-            // Decrement the inflight invocation count.
-            const n = this.#inflight_invocations.get(ref) ?? 0;
-            if (n <= 1) this.#inflight_invocations.delete(ref);
-            else this.#inflight_invocations.set(ref, n - 1);
-          }
+          if (ref) this.invocations.exit(ref);
         }
 
         break;
@@ -1390,6 +1391,7 @@ export class Session {
         clearTimeout(invocation.timer);
         this.#pending_invocations.delete(eid);
         this.outbound.exit();
+        if (invocation.ref) this.invocations.exit(invocation.ref);
 
         if (status === WireStatus.OK) invocation.resolve(packet.payload.result);
         else {
@@ -1600,39 +1602,29 @@ export class Session {
   }
 
   /**
-   * Polls via `setImmediate` until all in-flight `CBK:INVOKE` packets under `ref` have received
-   * their `CBK:RETURN`. Falls through after `defaultTimeout` to avoid blocking indefinitely on
-   * an unresponsive peer; remaining callbacks are implicitly released when `callbacks.clear()` fires.
+   * Awaits all in-flight `CBK:INVOKE` work under `ref` — both inbound INVOKEs we're servicing
+   * and outbound INVOKEs awaiting RETURN. Falls through after `defaultTimeout` to avoid hanging
+   * on an unresponsive peer; any straggler `exit` calls after the fall-through still match the
+   * outstanding `enter` calls cleanly. Remaining callbacks are implicitly released when
+   * `callbacks.clear()` fires at session close.
    */
-  private drainInflightInvocations(ref: CorrelationId): Promise<void> {
-    const remaining = (): number => {
-      let n = this.#inflight_invocations.get(ref) ?? 0;
-      for (const inv of this.#pending_invocations.values()) inv.ref === ref && n++;
-      return n;
-    };
+  private async drainInflightInvocations(ref: CorrelationId): Promise<void> {
+    if (this.invocations.active(ref) === 0) return;
 
-    if (remaining() === 0) return Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.invocations.idle(ref),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          resolve();
+          this.logger?.debug(
+            `Drain inflight deadline hit for ${clip(ref)} with ${this.invocations.active(ref)} pending`,
+          );
+        }, this.config.defaultTimeout);
+      }),
+    ]);
 
-    // Attach a hard deadline so we don't busy-loop forever if invocations
-    // never complete (e.g. peer gone). On timeout we log at debug and
-    // resolve anyway; the callbacks will be implicitly released when
-    // `callbacks.clear()` runs at session close.
-    const deadline = this.config.defaultTimeout;
-    return new Promise<void>((resolve) => {
-      const start = Date.now();
-      const check = (): void => {
-        if (remaining() === 0) return void resolve();
-        if (Date.now() - start >= deadline) {
-          this.logger?.debug(`Drain inflight deadline hit for ${clip(ref)} with ${remaining()} pending`);
-          this.#inflight_invocations.delete(ref);
-          return void resolve();
-        }
-
-        setImmediate(check);
-      };
-
-      setImmediate(check);
-    });
+    if (timer) clearTimeout(timer);
   }
 
   /**
@@ -1722,6 +1714,7 @@ export class Session {
           timer = setTimeout(() => {
             this.#pending_invocations.delete(eid);
             this.outbound.exit();
+            if (ref) this.invocations.exit(ref);
 
             reject(
               new QuiryError(
@@ -1749,6 +1742,7 @@ export class Session {
           timer,
         } satisfies PendingCallbackInvocation);
         this.outbound.enter();
+        if (ref) this.invocations.enter(ref);
 
         void this.send({
           kind: WireKind.CALLBACK,
@@ -1761,6 +1755,7 @@ export class Session {
           if (pending.timer) clearTimeout(pending.timer);
           this.#pending_invocations.delete(eid);
           this.outbound.exit();
+          if (ref) this.invocations.exit(ref);
 
           reject(
             new QuiryError(WireStatus.DATA_LOSS, "Failed to send callback invocation", {
