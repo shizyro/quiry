@@ -1,25 +1,53 @@
 import type { AnyPacket } from "../interface/packets";
 
 /**
- * Whether `value` is safe for structured clone / typical IPC payloads (plain data only).
- * Typed arrays, `ArrayBuffer`, and ports are rejected here — use transfer lists for those.
+ * Whether `value` can survive a structured-clone hop across a thread or
+ * process boundary. Used as a fast pre-check before handing payloads.
  */
 export function isSerializable(value: unknown, seen = new WeakSet<object>()): value is Serializable {
   if (value === null || value === undefined) return true;
+
   const t = typeof value;
   if (t === "string" || t === "number" || t === "boolean" || t === "bigint") return true;
-  if (t === "function" || t === "symbol") return false;
-  if (t === "object") {
-    if (seen.has(value as object)) return false;
-    seen.add(value as object);
+  if (t !== "object") return false; // function, symbol
+
+  // Atomic cloneable host types.
+  if (value instanceof Date) return true;
+  if (value instanceof RegExp) return true;
+  if (value instanceof Error) return true;
+  if (value instanceof ArrayBuffer) return true;
+  if (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer) return true;
+  if (ArrayBuffer.isView(value)) return true; // typed arrays, DataView, Node Buffer
+  // `URL` are notably not accepted. Despite being part of the HTML spec's
+  // cloneable set, Node's `structuredClone` doesn't recognize WHATWG URL
+  // objects. Pass `url.href` instead.
+
+  // Track membership on the *active recursion path* so a true
+  // cycle is rejected, but a value shared by reference across
+  // sibling branches still passes.
+  if (seen.has(value as object)) return false;
+  seen.add(value as object);
+  try {
+    if (value instanceof Map) {
+      for (const [k, v] of value) {
+        if (!isSerializable(k, seen) || !isSerializable(v, seen)) return false;
+      }
+      return true;
+    }
+    if (value instanceof Set) {
+      for (const v of value) if (!isSerializable(v, seen)) return false;
+      return true;
+    }
     if (Array.isArray(value)) return value.every((v) => isSerializable(v, seen));
-    // Accept plain objects only; typed arrays / ArrayBuffer / MessagePort
-    // are transferable but not typically useful in error detail.
+
+    // Plain objects only past this point.
+    // Class instances with custom prototypes are rejected.
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) return false;
     return Object.values(value as Record<string, unknown>).every((v) => isSerializable(v, seen));
+  } finally {
+    seen.delete(value as object);
   }
-  return false;
 }
 
 export function isPrimitive(value: unknown): value is Primitive {

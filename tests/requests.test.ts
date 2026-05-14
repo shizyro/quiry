@@ -436,7 +436,7 @@ describe("Session requests", () => {
 
     it("rejects with INTERNAL when the producer returns a non-serializable (expect functions)", async () => {
       pair = await openSessionPair({
-        producerInquiry: async () => new ArrayBuffer(),
+        producerInquiry: async () => Symbol("x") as unknown,
       });
 
       const err = await pair.consumer

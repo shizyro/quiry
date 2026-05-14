@@ -171,7 +171,7 @@ Some values are intentionally limited or not supported yet:
 - non-serializable values do not work unless provided a specific proxy mechanism for them
 - functions are supported through callback proxies and returned function stubs, not through structured cloning itself
 
-Transferables and `SharedArrayBuffer` support are planned, but the API and ownership semantics are not settled.
+Transferables objects are supported and are collected automatically from requests. However, they are not thoroughly tested, yet. While the structured clone algorithm accepts `SharedArrayBuffer` objects, shared memory is only accessible to worker threads; child processes operate in entirely isolated memory spaces.
 
 
 ## Status
