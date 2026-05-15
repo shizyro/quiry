@@ -8,7 +8,7 @@ export const WireKind = {
   RESPONSE: "RES",
   /** A proxied function argument being invoked by the remote side. */
   CALLBACK: "CBK",
-  /** System-level messages; handshake, peer discovery, etc. */
+  /** System-level messages; drain, peer discovery, etc. */
   SYSTEM: "SYS",
 } as const;
 export type WireKind = (typeof WireKind)[keyof typeof WireKind];
@@ -88,21 +88,5 @@ export interface RequestControl {
 export interface RetryPolicy {
   readonly maxAttempts?: number;
   readonly backoffStrategy?: "fixed" | "exponential";
-  readonly delay?: number;
-}
-
-/** @deprecated */
-export interface MetricsData {
-  readonly memory?: {
-    readonly heapUsed: number;
-    readonly heapTotal: number;
-    readonly external: number;
-    readonly rss: number;
-  };
-  readonly cpu?: {
-    readonly usage: NodeJS.CpuUsage;
-    readonly loadAverage?: readonly number[];
-  };
-  readonly uptime?: number;
-  readonly custom?: Record<string, number>;
+  readonly backoffDelay?: number;
 }

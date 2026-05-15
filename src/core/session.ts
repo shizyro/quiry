@@ -260,7 +260,7 @@ export class Session {
       creditWindow: config.creditWindow ?? 100,
       defaultRetry: {
         maxAttempts: config.defaultRetry?.maxAttempts ?? 3,
-        delay: config.defaultRetry?.delay ?? 1000,
+        backoffDelay: config.defaultRetry?.backoffDelay ?? 1000,
         backoffStrategy: config.defaultRetry?.backoffStrategy ?? "exponential",
       },
     };
@@ -771,7 +771,7 @@ export class Session {
         }),
       {
         retries: (control?.retry?.maxAttempts ?? this.config.defaultRetry.maxAttempts) - 1,
-        initialDelay: control?.retry?.delay ?? this.config.defaultRetry.delay,
+        initialDelay: control?.retry?.backoffDelay ?? this.config.defaultRetry.backoffDelay,
         backoffStrategy: control?.retry?.backoffStrategy ?? this.config.defaultRetry.backoffStrategy,
         shouldRetry: (error: unknown) => (error instanceof QuiryError ? isRetryableStatus(error.code) : true),
         signal,
@@ -1886,3 +1886,7 @@ export interface SessionStatus {
 function clip(text: string, length: number = 8): string {
   return text.slice(0, length) + (text.length > length ? `[:${text.length - length}]` : "");
 }
+
+type DeepRequired<T> = Required<{
+  [K in keyof T]: T[K] extends Required<T[K]> ? T[K] : DeepRequired<T[K]>;
+}>;

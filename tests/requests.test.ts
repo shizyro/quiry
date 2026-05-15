@@ -214,7 +214,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, delay: 1 } }),
+        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, backoffDelay: 1 } }),
       ).resolves.toBe("ok");
       expect(attempts).toBe(3);
     });
@@ -231,7 +231,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, delay: 1 } }),
+        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, backoffDelay: 1 } }),
       ).rejects.toMatchObject({ code: WireStatus.INVALID_ARGUMENT });
       expect(attempts).toBe(1);
     });
@@ -248,7 +248,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 2, delay: 1 } }),
+        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 2, backoffDelay: 1 } }),
       ).rejects.toMatchObject({
         code: WireStatus.UNAVAILABLE,
         message: "still down",
@@ -270,7 +270,7 @@ describe("Session requests", () => {
       });
 
       await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 2, delay: 60 } }),
+        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 2, backoffDelay: 60 } }),
       ).rejects.toMatchObject({ code: WireStatus.UNAVAILABLE });
 
       expect(attempts).toBe(2);
@@ -295,7 +295,7 @@ describe("Session requests", () => {
         "svc",
         "_",
         [],
-        { retry: { maxAttempts: 5, delay: 1000 } },
+        { retry: { maxAttempts: 5, backoffDelay: 1000 } },
         ac.signal,
       );
 

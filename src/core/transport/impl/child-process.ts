@@ -1,4 +1,4 @@
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, type Serializable } from "node:child_process";
 
 import { BaseTransport } from "../base";
 import { TransportState, type TransportOptions } from "..";
