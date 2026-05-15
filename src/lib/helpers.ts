@@ -69,7 +69,12 @@ export function isAnyIterableIterator(
   value: unknown,
 ): value is IterableIterator<unknown> | AsyncIterableIterator<unknown> {
   return (
-    typeof value === "object" && value !== null && (Symbol.iterator in value || Symbol.asyncIterator in value)
+    typeof value === "object" &&
+    value !== null &&
+    // fix: check for `next`, so arrays don't get caught.
+    typeof (value as { next?: unknown }).next === "function" &&
+    (typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function" ||
+      typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function")
   );
 }
 
@@ -107,4 +112,17 @@ export function collectTransferables(value: unknown, seen = new Set<object>()): 
   if (ArrayBuffer.isView(value)) return value.buffer instanceof ArrayBuffer ? [value.buffer] : [];
 
   return Object.values(value).flatMap((item) => collectTransferables(item, seen));
+}
+
+export function fetchDescriptor(
+  target: object,
+  key: PropertyKey,
+): [object, PropertyDescriptor] | [null, undefined] {
+  let self: object | null = target;
+  while (self) {
+    const descriptor = Object.getOwnPropertyDescriptor(self, key);
+    if (descriptor) return [self, descriptor];
+    self = Object.getPrototypeOf(self);
+  }
+  return [null, undefined];
 }

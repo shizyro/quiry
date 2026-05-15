@@ -1,35 +1,59 @@
-import { Session, type InquiryFunc, type SessionConfig } from "~/core/session";
+import {
+  type InquiryDescriptor,
+  Session,
+  type InquiryFunc,
+  type SessionConfig,
+  type InquiryRequest,
+} from "~/core/session";
 import { pairTransports } from "./mock-transport";
 
 export type SessionPair = { producer: Session; consumer: Session; close: (force?: boolean) => Promise<void> };
 
+export const defaultInquiryDescriptor = (overrides: Partial<InquiryDescriptor> = {}): InquiryDescriptor => ({
+  value: undefined,
+  get: () => undefined,
+  set: () => undefined,
+  enumerable: false,
+  writable: false,
+  ...overrides,
+});
+
+export type MockInquiryFunc = (request: InquiryRequest) => Partial<InquiryDescriptor>;
+
 /**
  * Opens a pair of peered {@link Session} instances linked via the in-memory
- * {@link MockTransport}. Both sessions complete their handshakes before the
- * pair is returned.
+ * {@link MockTransport}.
  *
  * The caller provides the inquiry handlers for each side; the "producer" side
  * typically hosts a service that returns an async iterator, the "consumer"
  * side is the one that calls `.stream(...)`.
  */
-export async function openSessionPair(options: {
-  producerInquiry?: InquiryFunc;
-  consumerInquiry?: InquiryFunc;
-  config?: Partial<SessionConfig>;
-}): Promise<SessionPair> {
+export function openSessionPair(
+  options: {
+    producerInquiry?: MockInquiryFunc;
+    consumerInquiry?: MockInquiryFunc;
+    config?: Partial<SessionConfig>;
+  } = {},
+): SessionPair {
   const [tA, tB] = pairTransports();
 
-  const producer = new Session(tA, options.producerInquiry ?? (() => Promise.resolve()), {
-    ...options.config,
-  });
-  const consumer = new Session(tB, options.consumerInquiry ?? (() => Promise.resolve()), {
-    ...options.config,
-  });
+  const producer = new Session(
+    tA,
+    (request) => defaultInquiryDescriptor(options.producerInquiry?.(request)),
+    {
+      ...options.config,
+    },
+  );
+  const consumer = new Session(
+    tB,
+    (request) => defaultInquiryDescriptor(options.consumerInquiry?.(request)),
+    {
+      ...options.config,
+    },
+  );
 
-  // Both sessions must call `open()` concurrently — each one sends a
-  // handshake packet and waits for the peer's, so sequential opens would
-  // deadlock waiting on a handshake the other side hasn't sent yet.
-  await Promise.all([producer.open(), consumer.open()]);
+  producer.open();
+  consumer.open();
 
   return {
     producer,

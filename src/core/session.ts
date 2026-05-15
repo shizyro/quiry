@@ -18,20 +18,28 @@ import { retryable, timeout, abortable } from "../lib/utils";
 
 import { randomBytes } from "node:crypto";
 
-export type InquiryFunc = (
-  request: InquiryRequest,
-) => Promise<unknown> | AsyncIterableIterator<unknown> | IterableIterator<unknown>;
-export type InquiryMethod = "get" | "set";
-// biome-ignore format: compact.
-export type InquiryRequest<Method extends InquiryMethod = "get"> = Readonly<
-  {
-    method: Method;
-    service: string;
-    property: string;
-  } & (Method extends "get"
-    ? { args: ReadonlyArray<unknown> }
-    : { readonly value: unknown })
->;
+export type InquiryFunc = (request: InquiryRequest) => InquiryDescriptor;
+
+export interface InquiryRequest {
+  readonly service: string;
+  readonly property: string;
+}
+
+/**
+ * Unified descriptor for reading and writing a resolved property.
+ *
+ * This descriptor intentionally presents a normalized interface rather than
+ * mirroring native JavaScript property descriptors. In particular, `get` and
+ * `set` are always provided, even when the underlying property is a data
+ * property, accessor, method, or inherited member.
+ */
+export interface InquiryDescriptor<T = unknown> {
+  value: T;
+  get: () => T;
+  set: (value: T) => void;
+  enumerable: boolean;
+  writable: boolean;
+}
 
 interface PendingGetRequest<T = unknown> {
   readonly kind: "get";
@@ -1079,15 +1087,10 @@ export class Session {
       // dispatch the request to inquiry
       // TODO: maybe something like a semaphore to limit the number of concurrent requests
 
-      const setter = packet.type === Packets.RequestMessageType.SET;
       const request = {
-        method: setter ? "set" : "get",
         service: packet.payload.service,
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
-        ...(setter
-          ? { value: packet.payload.value }
-          : { args: "args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : [] }),
-      } as unknown as InquiryRequest;
+      } satisfies InquiryRequest;
 
       let controller: AbortController | undefined;
       if ("control" in packet.payload && packet.payload.control?.abortable) {
@@ -1096,44 +1099,78 @@ export class Session {
       }
 
       try {
-        const result = this.inquiry(request);
+        const descriptor = this.inquiry(request);
+        let result: unknown;
 
-        if (isAnyIterableIterator(result)) {
-          // Streaming results must be detected *before* the serialization
-          // check: async iterators have a non-plain prototype and would
-          // otherwise be rejected as non-serializable. Individual chunks are
-          // validated as they are pulled from the iterator.
-          await this.streamOutboundResponse(packet.id, result);
-        } else {
-          const value = await abortable(
-            timeout(
-              result,
-              ("control" in packet.payload && packet.payload.control?.timeout !== undefined
-                ? packet.payload.control.timeout
-                : this.config.defaultTimeout) -
-                (Date.now() - packet.timestamp),
-              "Timeout waiting for inquiry response",
-            ),
-            controller?.signal,
-          ).finally(() => controller && this.controllers.delete(packet.id));
+        switch (packet.type) {
+          case Packets.RequestMessageType.SET:
+            this.logger?.trace(`Setting property ${request.property} to ${packet.payload.value}`);
+            descriptor.set(packet.payload.value);
+            break;
 
-          const substituted = this.callbacks.substitute(value);
-          if (!isSerializable(substituted))
-            throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
-              ...context,
-              detail: { value: substituted },
-            });
+          case Packets.RequestMessageType.GET:
+            result = descriptor.value;
+            break;
 
-          await this.send<Packets.ValueResponsePacket>({
-            kind: WireKind.RESPONSE,
-            type: Packets.ResponseMessageType.VALUE,
-            payload: {
-              ref: packet.id,
-              status: WireStatus.OK,
-              result: substituted,
-            },
-          });
+          case Packets.RequestMessageType.CALL: {
+            const prop = descriptor.value;
+            if (typeof prop !== "function") {
+              throw new QuiryError(
+                WireStatus.INVALID_ARGUMENT,
+                `Property ${request.property} is not a function`,
+                context,
+              );
+            }
+
+            this.logger?.trace(
+              `Invoking method ${request.service}.${request.property} with ${packet.payload.args.length} arguments`,
+            );
+
+            // Invoke with no try/catch, so the error is propagated to the caller.
+            const value = prop(
+              ...("args" in packet.payload ? this.restoreStubs(packet.payload.args, packet.id) : []),
+            );
+
+            if (isAnyIterableIterator(value)) {
+              // Streaming results must be detected *before* the serialization
+              // check: async iterators have a non-plain prototype and would
+              // otherwise be rejected as non-serializable. Individual chunks are
+              // validated as they are pulled from the iterator.
+              return await this.streamOutboundResponse(packet.id, value);
+            }
+
+            result = await abortable(
+              timeout(
+                Promise.resolve(value),
+                ("control" in packet.payload && packet.payload.control?.timeout !== undefined
+                  ? packet.payload.control.timeout
+                  : this.config.defaultTimeout) -
+                  (Date.now() - packet.timestamp),
+                "Timeout waiting for inquiry response",
+              ),
+              controller?.signal,
+            ).finally(() => controller && this.controllers.delete(packet.id));
+
+            break;
+          }
         }
+
+        const substituted = this.callbacks.substitute(result);
+        if (!isSerializable(substituted))
+          throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
+            ...context,
+            detail: { value: substituted },
+          });
+
+        await this.send<Packets.ValueResponsePacket>({
+          kind: WireKind.RESPONSE,
+          type: Packets.ResponseMessageType.VALUE,
+          payload: {
+            ref: packet.id,
+            status: WireStatus.OK,
+            result: substituted,
+          },
+        });
       } catch (cause: unknown) {
         // The session stays up; the caller learns about the failure via the wire error.
         const error = QuiryError.from(cause, context);

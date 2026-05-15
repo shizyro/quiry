@@ -8,7 +8,7 @@ import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "nod
 import { EventEmitter } from "node:events";
 
 import { QuiryError } from "./shared/errors";
-import { type InquiryMethod, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
+import { type InquiryDescriptor, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
 import { PeerConnection, type PeerIdentifier } from "./internal";
 
 import { WireStatus } from "./interface/protocol";
@@ -18,8 +18,8 @@ import type { ServiceImpl, ServiceRegistry } from "./interface/types";
 import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
 import { WorkerThreadsTransport } from "./core/transport/impl/worker-threads";
-import { isAnyIterableIterator, isSerializable } from "./lib/helpers";
 
+import { fetchDescriptor } from "./lib/helpers";
 import { randomBytes } from "node:crypto";
 
 const registry = new Map<string, ServiceImpl>();
@@ -171,7 +171,7 @@ export function clear(): void {
 
 // --------- INTERNAL --------- //
 
-function handleInquiry(request: InquiryRequest<InquiryMethod>): ReturnType<InquiryFunc> {
+function handleInquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
   const context = {
     detail: { query: { service: request.service, property: request.property } },
   };
@@ -186,87 +186,47 @@ function handleInquiry(request: InquiryRequest<InquiryMethod>): ReturnType<Inqui
     );
   }
 
-  switch (request.method) {
-    case "set": {
-      if (!("value" in request)) {
-        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Value is required", context);
-      }
+  return makeInquiryDescriptor(impl, request.property);
+}
 
-      const descriptor = Object.getOwnPropertyDescriptor(impl, request.property);
-      if (!descriptor) {
-        throw new QuiryError(
-          WireStatus.NOT_FOUND,
-          `Property ${request.property} does not exist in service ${request.service}`,
-          context,
-        );
-      }
-
-      // There is no reliable way to check if a property is readonly (TS), so as best-effort,
-      // we just check if the descriptor is writable and if the set accessor is not a function.
-
-      // Although, the typing system does produce a compile-time error. This doesn't proof anything,
-      // but it's a good enough approximation.
-
-      if (
-        ("writable" in descriptor ? descriptor.writable !== true : typeof descriptor.set !== "function") ||
-        typeof descriptor.value === "function"
-        // Object.isFrozen(impl[request.property as keyof typeof impl])
-      ) {
-        throw new QuiryError(
-          WireStatus.FAILED_PRECONDITION,
-          `Property ${request.property} is not writable`,
-          context,
-        );
-      }
-
-      _logger?.trace(`Setting property ${request.property} to ${request.value}`);
-
-      return new Promise((resolve) => {
-        (impl as { [request.property]: unknown })[request.property] = request.value;
-        resolve(true);
-      });
-    }
-
-    case "get": {
-      if (!("args" in request)) {
-        throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Args are required", context);
-      }
-
-      const prop = impl[request.property as keyof typeof impl] as unknown;
-      // Property GET — key exists but is not a function
-      if (typeof prop !== "function") {
-        if (!isSerializable(prop)) {
-          throw new QuiryError(
-            WireStatus.MALFORMED_RESPONSE,
-            "Property value is not serializable and cannot be retrieved",
-            context,
-          );
-        }
-
-        return Promise.resolve(prop);
-      }
-
-      _logger?.trace(
-        `Invoking method ${request.service}.${request.property} with ${request.args.length} arguments`,
-      );
-
-      let result: unknown;
-      try {
-        result = prop.apply(impl, request.args as unknown[]);
-      } catch (error: unknown) {
-        return Promise.reject(
-          new QuiryError(WireStatus.INTERNAL, "Failed to invoke method", { ...context, cause: error }),
-        );
-      }
-
-      if (typeof result === "object" && result !== null) {
-        if (isAnyIterableIterator(result)) return result;
-        if (typeof (result as PromiseLike<unknown>).then === "function") return result as Promise<unknown>;
-      }
-
-      return Promise.resolve(result);
-    }
+function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): InquiryDescriptor<T> {
+  const [target, descriptor] = fetchDescriptor(impl, key);
+  if (!descriptor) {
+    throw new ReferenceError(`Property ${String(key)} does not exist in service ${String(impl)}`);
   }
+
+  const isData = "value" in descriptor;
+  const isFunction = isData && typeof descriptor.value === "function";
+  let boundFn: Function | undefined;
+
+  return {
+    get value() {
+      return this.get();
+    },
+    get() {
+      if (isData) return isFunction ? (boundFn ??= descriptor.value.bind(impl)) : descriptor.value;
+      const value = descriptor.get?.call(impl);
+      return typeof value === "function" ? value.bind(impl) : value;
+    },
+    set(value: T) {
+      if (!this.writable) {
+        throw new TypeError(`Property ${String(key)} is not writable`);
+      }
+
+      if (isData) {
+        // descriptor.value = value;
+        // Object.defineProperty(impl, key, descriptor);
+        Reflect.set(target, key, value, impl);
+        return;
+      }
+
+      descriptor.set!.call(impl, value);
+    },
+    // There is no reliable way to check if a property is readonly (TS), so as best-effort,
+    // we just check if the descriptor is writable or if the set accessor is not undefined.
+    writable: isFunction ? false : isData ? !!descriptor.writable : !!descriptor.set,
+    enumerable: !!descriptor.enumerable,
+  };
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };

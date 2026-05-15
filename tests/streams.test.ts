@@ -17,14 +17,15 @@ describe("Session streaming", () => {
   });
 
   it("chunks flow in order through end-of-stream", async () => {
-    pair = await openSessionPair({
-      producerInquiry: function* (request) {
-        const [start, end] = request.args as [number, number];
-        for (let i = start; i < end; i++) yield i;
-      },
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: function* (start: number, end: number) {
+          for (let i = start; i < end; i++) yield i;
+        },
+      }),
     });
 
-    const stream = pair.consumer.stream("_", "range", [0, 5]);
+    const stream = pair.consumer.stream("svc", "range", [0, 5]);
     const received: unknown[] = [];
     for await (const chunk of stream) received.push(chunk);
 
@@ -32,15 +33,17 @@ describe("Session streaming", () => {
   });
 
   it("propagates producer errors to the consumer", async () => {
-    pair = await openSessionPair({
-      producerInquiry: function* () {
-        yield "a";
-        yield "b";
-        throw new Error("producer failed");
-      } as any,
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: function* () {
+          yield "a";
+          yield "b";
+          throw new Error("producer failed");
+        },
+      }),
     });
 
-    const stream = pair.consumer.stream("_", "broken", []);
+    const stream = pair.consumer.stream("svc", "broken", []);
     const received: unknown[] = [];
 
     let caught: unknown = null;
@@ -59,24 +62,26 @@ describe("Session streaming", () => {
     let sent = 0;
     let cancelled = false;
 
-    pair = await openSessionPair({
-      producerInquiry: async function* () {
-        try {
-          // Large window; rely on the consumer cancelling to stop us.
-          for (let i = 0; i < 1000; i++) {
-            sent = i + 1;
-            yield i;
-            // Yield back to the microtask queue so incoming CANCEL
-            // packets can be processed between emissions.
-            await new Promise<void>((r) => setTimeout(r, 0));
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async function* () {
+          try {
+            // Large window; rely on the consumer cancelling to stop us.
+            for (let i = 0; i < 1000; i++) {
+              sent = i + 1;
+              yield i;
+              // Yield back to the microtask queue so incoming CANCEL
+              // packets can be processed between emissions.
+              await new Promise<void>((r) => setTimeout(r, 0));
+            }
+          } finally {
+            cancelled = true;
           }
-        } finally {
-          cancelled = true;
-        }
-      } as any,
+        },
+      }),
     });
 
-    const stream = pair.consumer.stream("_", "infinite", []);
+    const stream = pair.consumer.stream("svc", "infinite", []);
 
     let count = 0;
     for await (const _chunk of stream) {
@@ -98,19 +103,21 @@ describe("Session streaming", () => {
   });
 
   it("credit backpressure throttles a fast producer to the consumer's pace", async () => {
-    const total = 260; // > 2 * default window (100) to force multiple replenishments
+    const total = 260; // > 2 * default window (100) to force multiple replenishes
     let producerEmitted = 0;
 
-    pair = await openSessionPair({
-      producerInquiry: function* () {
-        for (let i = 0; i < total; i++) {
-          producerEmitted = i + 1;
-          yield i;
-        }
-      } as any,
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: function* () {
+          for (let i = 0; i < total; i++) {
+            producerEmitted = i + 1;
+            yield i;
+          }
+        },
+      }),
     });
 
-    const stream = pair.consumer.stream("_", "many", []);
+    const stream = pair.consumer.stream("svc", "many", []);
     const received: number[] = [];
     for await (const chunk of stream) received.push(chunk as number);
 
