@@ -44,7 +44,7 @@ export interface SessionEvents {
   "session:terminate": { readonly reason?: string };
   "request:sent": WithRef<{
     readonly service: string;
-    readonly method: string;
+    readonly property: string;
     readonly kind: RequestKind;
   }>;
   "request:settled": WithRef<{

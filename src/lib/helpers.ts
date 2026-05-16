@@ -1,4 +1,5 @@
 import type { AnyPacket } from "../interface/packets";
+import * as QuirySymbol from "../core/infra/symbol";
 
 /**
  * Whether `value` can survive a structured-clone hop across a thread or
@@ -125,4 +126,30 @@ export function fetchDescriptor(
     self = Object.getPrototypeOf(self);
   }
   return [null, undefined];
+}
+
+/**
+ * Strips `[QuirySymbol.serialize]` aliases recursively.
+ *
+ * Cycles are preserved (not unwrapped) so the downstream serialization
+ * check rejects them with INVALID_ARGUMENT instead of blowing the stack.
+ */
+export function unwrapSerialized<T = unknown>(value: T, seen?: WeakSet<object>): T {
+  if (Object(value) !== value || value === null) return value;
+  if (QuirySymbol.serialize in (value as object)) {
+    return (value as unknown as { [QuirySymbol.serialize]: T })[QuirySymbol.serialize];
+  }
+  if (typeof value === "object") {
+    seen ??= new WeakSet();
+    if (seen.has(value as object)) return value;
+    seen.add(value as object);
+
+    if (Array.isArray(value)) return value.map((v) => unwrapSerialized(v, seen)) as T;
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as object)) {
+      result[key] = unwrapSerialized(val, seen);
+    }
+    return result as T;
+  }
+  return value;
 }

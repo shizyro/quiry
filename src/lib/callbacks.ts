@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
  * Intentionally a string literal to allow for exchange with the remote
  * side. Though, I don't know if there is a better way to do this.
  */
-export const stub = "quiry.callback.stub" as const;
+const stub = "quiry.callback.stub" as const;
 
 export interface Callback {
   readonly [stub]: true;

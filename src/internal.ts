@@ -1,9 +1,11 @@
-import { Session, type CallbackHandle } from "./core/session";
+import type { Session, CallbackHandle } from "./core/session";
 import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/errors";
 
 import type { ServiceRegistry, ServiceImpl } from "./interface/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
 import { WireStatus, type RequestControl } from "./interface/protocol";
+
+import * as QuirySymbol from "./core/infra/symbol";
 
 export type PeerIdentifier = string;
 
@@ -42,7 +44,7 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
   callback<T extends Function>(fn: T): CallbackHandle<T> {
     if (typeof fn !== "function")
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
-    if (Session.serialize in fn)
+    if (QuirySymbol.serialize in fn)
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Function is already bound as a callback handle");
 
     return this.session.proxy(fn);

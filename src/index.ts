@@ -19,6 +19,12 @@ import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
 import { WorkerThreadsTransport } from "./core/transport/impl/worker-threads";
 
+import { DiagnosticBus } from "./lib/diagnostics";
+import {
+  DIAGNOSTIC_CHANNEL_PREFIX,
+  type QuiryEvents as DiagnosticQuiryEvents,
+} from "./interface/diagnostics";
+
 import { fetchDescriptor } from "./lib/helpers";
 import { randomBytes } from "node:crypto";
 
@@ -33,15 +39,13 @@ export interface QuiryEvents {
 }
 
 const emitter = new EventEmitter<QuiryEvents>();
-let _logger: Logger | null = null;
-
 /**
- * Install a logger sink. Pass `null` to disable logging.
- * Logger is consulted by every active session and by the namespace itself.
+ * Module-level diagnostic bus. Carries peer-lifecycle events
+ * (`peer:attached`, `peer:detached`). Per-session diagnostics live on
+ * `session.diag` (see `Session#diag`). Bridges to `node:diagnostics_channel`
+ * under the `quiry:` prefix for external observability tooling.
  */
-export function setLogger(logger: Logger | null): void {
-  _logger = logger;
-}
+export const diagnostic = new DiagnosticBus<DiagnosticQuiryEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
 
 export function on<K extends keyof QuiryEvents>(
   event: K,
@@ -68,7 +72,7 @@ export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): P
 export function attach<TServices extends ServiceRegistry = {}>(
   transport: Transport<AnyPacket>,
 ): PeerConnection<TServices> {
-  const session = new Session(transport, handleInquiry, {}, _logger).open();
+  const session = new Session(transport, handleInquiry, {}).open();
   const identifier = randomBytes(4).toString("hex");
   const connection = new PeerConnection(identifier, session);
   peers.set(identifier, connection);
@@ -78,14 +82,14 @@ export function attach<TServices extends ServiceRegistry = {}>(
     (reason?: string) => {
       if (peers.delete(identifier)) {
         emitter.emit("peer-disconnected", connection, reason);
-        _logger?.info(`Peer ${String(identifier)} disconnected`);
+        diagnostic.maybe("peer:detached")?.({ identifier, reason });
       }
     },
     { once: true },
   );
 
-  _logger?.info(`Peer ${String(identifier)} attached`);
   emitter.emit("peer-connected", connection);
+  diagnostic.maybe("peer:attached")?.({ identifier });
   return connection as unknown as PeerConnection<TServices>;
 }
 
@@ -97,7 +101,6 @@ export async function detach(identifier: PeerIdentifier, kill: boolean = false):
   // registered in `attach()`. That listener removes the entry from `peers` and
   // emits `peer-disconnected`, so we don't need to do either of those here.
   await connection.close("detached", !kill);
-  _logger?.info(`Peer ${String(identifier)} detached`);
 }
 
 /** Resolve a peer connection by its identifier. */
@@ -138,7 +141,6 @@ export function expose(name: string, valueOrFactory: ServiceImpl | (() => Servic
   }
 
   registry.set(name, impl);
-  _logger?.debug(`Service "${name}" registered`);
   return impl;
 }
 
@@ -149,9 +151,7 @@ export function expose(name: string, valueOrFactory: ServiceImpl | (() => Servic
  * @returns `true` if the service was unregistered, `false` otherwise.
  */
 export function unexpose(name: string): boolean {
-  const removed = registry.delete(name);
-  if (removed) _logger?.debug(`Service "${name}" unregistered`);
-  return removed;
+  return registry.delete(name);
 }
 
 /** Resolve a registered service by name, or `undefined` if not registered. */
@@ -231,3 +231,4 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
 export type { RetryPolicy, RequestControl } from "./interface/protocol";
+export * as QuirySymbol from "./core/infra/symbol";
