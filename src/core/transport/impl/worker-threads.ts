@@ -2,11 +2,7 @@ import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import type { MessagePort, Transferable } from "node:worker_threads";
 
 import { BaseTransport } from "../base";
-import { TransportState, type TransportOptions } from "..";
-
-export interface WorkerThreadsTransportOptions extends TransportOptions {
-  readonly worker?: Worker;
-}
+import { TransportState } from "..";
 
 /**
  * Dual-mode transport for `worker_threads`. In the main thread, requires `opts.worker`;
@@ -16,13 +12,13 @@ export interface WorkerThreadsTransportOptions extends TransportOptions {
 export class WorkerThreadsTransport extends BaseTransport {
   private readonly port: Worker | MessagePort;
 
-  constructor(opts: WorkerThreadsTransportOptions = {}) {
+  constructor(worker?: Worker) {
     super();
 
     if (isMainThread) {
-      if (!opts.worker) throw new TypeError("Worker is required in main thread");
-      if (!(opts.worker instanceof Worker)) throw new TypeError("Worker instance is required");
-      this.port = opts.worker;
+      if (!worker) throw new TypeError("Worker is required in main thread");
+      if (!(worker instanceof Worker)) throw new TypeError("Worker instance is required");
+      this.port = worker;
     } else {
       if (!parentPort) throw new TypeError("parentPort is null — ensure this is running in a worker thread");
       this.port = parentPort;

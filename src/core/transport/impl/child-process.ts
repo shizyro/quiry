@@ -1,11 +1,7 @@
 import { ChildProcess, type Serializable } from "node:child_process";
 
 import { BaseTransport } from "../base";
-import { TransportState, type TransportOptions } from "..";
-
-export interface ChildProcessTransportOptions extends TransportOptions {
-  readonly child?: ChildProcess;
-}
+import { TransportState } from "..";
 
 /**
  * Dual-mode transport for `child_process.fork`. In the parent process, requires `opts.child`;
@@ -14,14 +10,14 @@ export interface ChildProcessTransportOptions extends TransportOptions {
 export class ChildProcessTransport extends BaseTransport {
   private readonly port: ChildProcess | NodeJS.Process;
 
-  constructor(opts: ChildProcessTransportOptions = {}) {
+  constructor(child?: ChildProcess) {
     super();
 
     const isChildProcess = typeof process.send === "function";
     if (!isChildProcess) {
-      if (!opts.child) throw new TypeError("Child process instance is required");
-      if (!(opts.child instanceof ChildProcess)) throw new TypeError("Child process instance is required");
-      this.port = opts.child;
+      if (!child) throw new TypeError("Child process instance is required");
+      if (!(child instanceof ChildProcess)) throw new TypeError("Child process instance is required");
+      this.port = child;
     } else {
       this.port = process;
     }

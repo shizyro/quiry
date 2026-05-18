@@ -3,10 +3,6 @@ export enum TransportState {
   CLOSED = "closed",
 }
 
-export interface TransportOptions {
-  // Nothing here, yet.
-}
-
 export interface TransportEvents {
   open: [];
   close: [reason?: string];

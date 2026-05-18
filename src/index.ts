@@ -60,13 +60,13 @@ export function on<K extends keyof QuiryEvents>(
 /** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
 export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
   const subprocess = NJSFork(filename, options);
-  return attach(new ChildProcessTransport({ child: subprocess }));
+  return attach(new ChildProcessTransport(subprocess));
 }
 
 /** Spawns a worker thread at `filename` and attaches it as a new peer via {@link WorkerThreadsTransport}. */
 export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
   const worker = new NJSWorker(filename, options);
-  return attach(new WorkerThreadsTransport({ worker }));
+  return attach(new WorkerThreadsTransport(worker));
 }
 
 export function attach<TServices extends ServiceRegistry = {}>(
