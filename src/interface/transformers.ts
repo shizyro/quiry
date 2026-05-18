@@ -28,18 +28,27 @@ export type RemotablePropertyKeys<T> = {
 
 // Per-method remote transformation
 
-type RemoteProperty<T, K extends keyof T> =
-  ( T[K] extends Serializable ? Promisify<T[K]> : unknown) &
-  ( T[K] extends AnyFn ? (...args: Parameters<T[K]>) =>
-    ReturnType<T[K]> extends (Iterable<any> | AsyncIterable<any>)
-      ? AsyncIterableIterator<UnwrapIterable<ReturnType<T[K]>>>
-      : Promise<DeepAsync<Awaited<ReturnType<T[K]>>>>
-    : unknown ) &
-  ( T[K] extends { new (...args: infer TArguments): infer TInstance }
-    ? { new (...args: TArguments): Promise<Remote<TInstance>> } : unknown)
+type RemoteProperty<T> =
+  T extends AnyFn
+    ? (...args: Parameters<T>) =>
+        ReturnType<T> extends string
+          ? Promise<DeepAsync<Awaited<ReturnType<T>>>>
+          : ReturnType<T> extends Iterable<any> | AsyncIterable<any>
+            ? AsyncIterableIterator<UnwrapIterable<ReturnType<T>>>
+            : Promise<DeepAsync<Awaited<ReturnType<T>>>>
+    : T extends abstract new (...args: infer Args) => infer Instance
+      ? { new (...args: Args): Promise<Remote<Instance>> }
+      : T extends Serializable
+        ? Promisify<T>
+        : T extends object
+          ? Remote<T>
+          : never;
 
 /**
  * Given the raw type definition of an object that exists remotely (on the other side of the thread/process boundary),
  * produces the type as it appears to local code when accessed via a proxy.
  */
-export type Remote<T> = { [K in keyof T]: RemoteProperty<T, K> };
+export type Remote<T> = {
+  [K in keyof T as RemoteProperty<T[K]> extends never ? never : K]:
+    RemoteProperty<T[K]>
+};
