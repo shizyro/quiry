@@ -46,22 +46,31 @@ export class MockTransport implements Transport {
     return { state: BackpressureState.OK, depth: 0 };
   }
 
-  private transition(next: TransportState): void {
+  private transition(next: TransportState, reason?: string): void {
     if (next === this.#state) return;
     this.#state = next;
     if (next === TransportState.OPEN) this.emit("open");
-    if (next === TransportState.CLOSED) this.emit("close");
+    if (next === TransportState.CLOSED) this.emit("close", reason);
   }
 
   open(): void {
     this.transition(TransportState.OPEN);
   }
 
-  close(): void {
+  close(reason?: string): void {
     if (this.#state === TransportState.CLOSED) return;
-    this.transition(TransportState.CLOSED);
-    this.#inbound.close();
+    const peer = this.#peer;
     this.#peer = null;
+    this.transition(TransportState.CLOSED, reason);
+    this.#inbound.close();
+
+    // Mirror real worker-thread / child-process semantics: the remote
+    // side observes a close event when its peer goes away. Without this
+    // the producer would keep running its outbound streams forever
+    // after a force-close on the consumer.
+    if (peer && peer.state === TransportState.OPEN) {
+      queueMicrotask(() => peer.close(reason));
+    }
   }
 
   async send(packet: AnyPacket): Promise<void> {

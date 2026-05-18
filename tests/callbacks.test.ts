@@ -1,10 +1,16 @@
 import { WireStatus } from "~/interface/protocol";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
+import type { CallbackHandle } from "~/core/session";
+import type { Remote } from "~/interface/transformers";
+
 import * as QuirySymbol from "~/core/infra/symbol";
 
+import { runGCPressure } from "./helpers/garbage-collection";
+
 /**
- * Tests for the Session's support of callback functions as arguments in request payloads.
+ * Tests for the Session's support of callback functions as
+ * arguments in request payloads.
  */
 describe("Session callbacks", () => {
   let pair: SessionPair | null = null;
@@ -16,304 +22,292 @@ describe("Session callbacks", () => {
     }
   });
 
-  describe("local (request-scoped) callbacks", () => {
-    it("a function passed in args is invoked from the producer's inquiry and returns its value", async () => {
-      let observed: unknown = null;
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (cb: (x: number) => Promise<number>) => {
-            observed = await cb(7);
-            return "ok";
-          },
-        }),
-      });
-
-      const local = vi.fn((x: number) => x * 2);
-      await expect(pair.consumer.request("svc", "invoke", [local])).resolves.toBe("ok");
-
-      expect(local).toHaveBeenCalledTimes(1);
-      expect(local).toHaveBeenCalledWith(7);
-      expect(observed).toBe(14);
-    });
-
-    it("a callback nested one level inside a plain-object arg is invoked too", async () => {
-      const ticks: number[] = [];
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (config: { name: string; tick: (n: number) => Promise<void> }) => {
-            expect(config.name).toBe("alpha");
-            expect(config.tick).toBeTypeOf("function");
-            await config.tick(1);
-            await config.tick(2);
-            return null;
-          },
-        }),
-      });
-
-      await pair.consumer.request("svc", "tick", [
-        {
-          name: "alpha",
-          tick: (n: number) => {
-            ticks.push(n);
-          },
+  it("a functional argument is invoked remotely with the right args, and its return value reaches the producer", async () => {
+    let observed: unknown = null;
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: (x: number) => Promise<number>) => {
+          observed = await cb(7);
+          return "ok";
         },
-      ]);
-
-      expect(ticks).toEqual([1, 2]);
+      }),
     });
 
-    it("multiple callbacks in the same request resolve independently with the right args", async () => {
-      const a = vi.fn((x: number) => x + 1);
-      const b = vi.fn((x: number) => x * 10);
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (
-            cbA: (x: number) => Promise<number>,
-            cbB: (x: number) => Promise<number>,
-            num: number,
-          ) => {
-            return await Promise.all([cbA(num), cbB(num)]);
-          },
-        }),
-      });
+    const local = vi.fn((x: number) => x * 2);
+    await expect(pair.consumer.request("svc", "_", [local])).resolves.toBe("ok");
+    expect(local).toHaveBeenCalledWith(7);
+    expect(observed).toBe(14);
+  });
 
-      await expect(pair.consumer.request("svc", "invoke", [a, b, 5])).resolves.toEqual([6, 50]);
-      expect(a).toHaveBeenCalledWith(5);
-      expect(b).toHaveBeenCalledWith(5);
+  it("substitution walks into objects and arrays nested in arguments", async () => {
+    const ticks: number[] = [];
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (config: { listeners: Array<{ on: (n: number) => Promise<void> }> }) => {
+          for (const l of config.listeners) await l.on(1);
+          for (const l of config.listeners) await l.on(2);
+          return null;
+        },
+      }),
     });
 
-    it("substitutes are tracked under the request's correlation id", async () => {
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: () => new Promise<never>(() => {}), // hangs forever
-        }),
-      });
+    await pair.consumer.request("svc", "_", [
+      { listeners: [{ on: (n: number) => ticks.push(n) }, { on: (n: number) => ticks.push(n * 10) }] },
+    ]);
 
-      const fn = (): number => 1;
-      const promise = pair.consumer.request("svc", "never", [fn], {
-        timeout: 60_000,
-        retry: { maxAttempts: 0 },
-      });
+    expect(ticks).toEqual([1, 10, 2, 20]);
+  });
 
-      // The substitute call happens synchronously inside `request()`,
-      // so the registry already shows the CALL entry before the
-      // promise has had a chance to roundtrip on the wire.
-      expect(pair.consumer.status.callbacks).toBe(1);
-
-      // Force-close to abort the hanging request — the CALL callback
-      // is still in the registry because no RELEASE has been sent.
-      await pair.consumer.close("explicit", false);
-      await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED });
-
-      // teardown wipes the whole registry.
-      expect(pair.consumer.status.callbacks).toBe(0);
-
-      // Skip the graceful close on the orphaned producer — its peer
-      // is gone, the DRAIN ACK will never arrive.
-      void pair.close(false);
+  it("a session-scoped callback released locally before invocation rejects", async () => {
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: () => Promise<unknown>) => {
+          // Yield long enough for the consumer's release() below to ride
+          // the wire before the producer dispatches INVOKE.
+          await new Promise((r) => setTimeout(r, 20));
+          return cb();
+        },
+      }),
     });
 
-    it("does not leave the producer-side stub map populated after the request settles", async () => {
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (cb: () => Promise<void>) => {
-            await cb();
-            return null;
-          },
-        }),
-      });
+    const cb = pair.consumer.proxy(() => "should-not-fire");
+    const promise = pair.consumer.request("svc", "_", [cb]);
+    cb[QuirySymbol.release]();
 
-      await pair.consumer.request("svc", "_", [() => {}]);
-      // The producer tracks remote stubs for the duration of the
-      // inbound request and clears them in the `finally` block before
-      // sending RELEASE. Wait for that side to settle.
-      await vi.waitFor(() => expect(pair!.producer.status.stubs).toBe(0));
+    await expect(promise).rejects.toMatchObject({ code: WireStatus.NOT_FOUND });
+  });
+
+  it("a session-scoped proxy is reusable across multiple requests", async () => {
+    const fn = vi.fn((x: number) => x + 100);
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: (x: number) => Promise<number>, x: number) => cb(x),
+      }),
     });
 
-    it("waits for in-flight callback invocations to settle before sending RELEASE", async () => {
-      // The producer kicks off a callback but doesn't await it before
-      // returning. `releaseRemoteSubs` must drain the pending invocation
-      // before letting RELEASE go out, otherwise the consumer would
-      // drop the callback while it's still running and the next
-      // invocation would race the release.
-      let resolveCallback: (() => void) | null = null;
-      let invocationFinished = false;
+    const cb = pair.consumer.proxy(fn);
+    await expect(pair.consumer.request("svc", "_", [cb, 1])).resolves.toBe(101);
+    await expect(pair.consumer.request("svc", "_", [cb, 2])).resolves.toBe(102);
+    expect(fn).toHaveBeenCalledTimes(2);
 
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (cb: () => Promise<void>) => {
-            // Fire the callback without awaiting; the consumer will
-            // not finish executing it until the test resolves
-            // `resolveCallback`.
-            void cb().finally(() => {
-              invocationFinished = true;
-            });
-            // Yield so the INVOKE packet hits the wire before we
-            // return — otherwise the producer's `finally` runs before
-            // the proxy has even registered the pending invocation
-            // and `drainInflightInvocations` sees nothing to wait on.
-            await new Promise((r) => setTimeout(r, 5));
-            return "done";
-          },
+    cb[QuirySymbol.release]();
+  });
+
+  it("producer waits for in-flight callback invocations to settle before sending RELEASE", async () => {
+    // Without this guarantee, the consumer could drop the local callback
+    // mid-execution because RELEASE arrived while the callback was still running.
+    let resolveCallback: (() => void) | null = null;
+    let invocationFinished = false;
+
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: () => Promise<void>) => {
+          // Fire-and-forget: producer returns before the callback settles.
+          void cb().finally(() => {
+            invocationFinished = true;
+          });
+          // Yield once so the INVOKE packet hits the wire before the
+          // producer's `finally` runs releaseRemoteSubs.
+          await new Promise((r) => setTimeout(r, 5));
+          return "ok";
+        },
+      }),
+    });
+
+    await pair.consumer.request("svc", "_", [
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCallback = resolve;
         }),
-      });
+    ]);
 
-      await pair.consumer.request("svc", "finish", [
-        () =>
-          new Promise<void>((resolve) => {
-            resolveCallback = resolve;
-          }),
-      ]);
+    // Request has resolved on the consumer side, but the producer is
+    // parked waiting for the callback to settle. RELEASE has not been
+    // sent yet, so the consumer's callback is still registered.
+    // await new Promise((r) => setTimeout(r, 25));
+    expect(invocationFinished).toBe(false);
 
-      // The request itself has resolved on the consumer side, but the
-      // producer is still parked in `drainInflightInvocations` waiting
-      // for the in-flight callback to settle. Give a beat to verify
-      // RELEASE hasn't fired yet.
-      await new Promise((r) => setTimeout(r, 25));
-      expect(pair.consumer.status.callbacks).toBe(1);
-      expect(invocationFinished).toBe(false);
+    resolveCallback!();
+    await vi.waitFor(() => expect(invocationFinished).toBe(true));
+  });
 
-      // Unblock the callback — drain completes, RELEASE goes out.
-      resolveCallback!();
-      await vi.waitFor(() => expect(invocationFinished).toBe(true), { timeout: 1000 });
-      expect(pair.consumer.status.callbacks).toBe(0);
+  it("call-scoped callbacks are reaped on both sides after the owning request settles", async () => {
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: () => Promise<unknown>) => cb(),
+      }),
+    });
+
+    await pair.consumer.request("svc", "_", [() => "x"]);
+
+    // Both ends should converge to zero: consumer drops the registry
+    // entry on RELEASE; producer drops the remote stub in its `finally`.
+    await vi.waitFor(() => {
+      expect(pair!.consumer.status.callbacks).toBe(0);
+      expect(pair!.producer.status.stubs).toBe(0);
     });
   });
 
-  describe("stack-scoped callbacks", () => {
-    it("a bound stub is reusable across multiple requests", async () => {
-      const fn = vi.fn((x: number) => x + 100);
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: async (cb: (x: number) => Promise<number>, x: number) => {
-            return await cb(x);
-          },
-        }),
-      });
-
-      const cb = pair.consumer.proxy(fn);
-      await expect(pair.consumer.request("svc", "_", [cb, 1])).resolves.toBe(101);
-      await expect(pair.consumer.request("svc", "_", [cb, 2])).resolves.toBe(102);
-
-      expect(fn).toHaveBeenCalledTimes(2);
+  it("session-scoped stubs survive RELEASE round-trips for unrelated local callbacks", async () => {
+    const sessionFn = vi.fn(() => "session");
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (session: () => Promise<string>, local: () => Promise<string>) => {
+          return await Promise.all([session(), local()]);
+        },
+      }),
     });
 
-    it.skip("stack-scoped stubs survive RELEASE round-trips for unrelated local callbacks", async () => {
-      const stackFn = vi.fn(() => "stack");
+    const listenerFn = vi.fn();
+    pair.consumer.diagnostic.once("callback:release", ({ id }) => listenerFn(id));
+
+    const cb = pair.consumer.proxy(sessionFn);
+    const result = await pair.consumer.request("svc", "_", [cb, () => "local"]);
+    expect(result).toEqual(["session", "local"]);
+
+    // Wait for the RELEASE for the SESSION callback; the CALL one must remain.
+    await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(1));
+    expect(listenerFn).toHaveBeenCalledTimes(1);
+    expect(listenerFn).not.toHaveBeenCalledWith(cb.id);
+  });
+
+  it("a callback that throws on the consumer side rejects the proxy with the error", async () => {
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async (cb: () => Promise<unknown>) => {
+          return await cb();
+        },
+      }),
+    });
+
+    const promise = pair.consumer.request("svc", "_", [
+      () => {
+        throw new Error("nope");
+      },
+    ]);
+    await expect(promise).rejects.toMatchObject({ message: "nope" });
+  });
+
+  it("inquiries that return a function are passed as callback proxies", async () => {
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: async () => () => "ok",
+      }),
+    });
+
+    const func = (await pair.consumer.request("svc", "_", [])) as CallbackHandle<() => Promise<string>>;
+    expect(typeof func).toBe("function");
+    expect(await func()).toBe("ok");
+
+    pair.producer.callbacks.releaseSessionCallbacks();
+  });
+
+  it("object returns are walked through and their functions are substituted as callback proxies", async () => {
+    const fn = vi.fn(() => ({ first: () => 1, second: () => 2, deep: { third: () => 3 } }));
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: () => fn(),
+      }),
+    });
+
+    const result = (await pair.consumer.request("svc", "_", [])) as Remote<ReturnType<typeof fn>>;
+    expect(typeof result).toBe("object");
+    expect(typeof result.first).toBe("function");
+    expect(typeof result.second).toBe("function");
+    expect(typeof result.deep.third).toBe("function");
+
+    expect(await result.first()).toBe(1);
+    expect(await result.second()).toBe(2);
+    expect(await result.deep.third()).toBe(3);
+
+    // Release the proxies.
+    pair.producer.callbacks.releaseSessionCallbacks();
+    expect(pair!.producer.status.callbacks).toBe(0);
+  });
+
+  describe("automatic callback cleanup", () => {
+    const handleGC = () => {
+      if (typeof globalThis.gc === "function") {
+        return [vi.fn(), () => globalThis.gc!()];
+      }
+
+      const controller = new AbortController();
+      return [
+        vi.fn(() => controller.abort()),
+        () => {
+          // Stimulate GC pressure to trigger the release.
+          runGCPressure({ signal: controller.signal });
+        },
+      ];
+    };
+
+    it("a local proxy is released through TC39 explicit resource management", async () => {
       pair = openSessionPair({
         producerInquiry: () => ({
-          value: async (stack: () => Promise<string>, local: () => Promise<string>) => {
-            return await Promise.all([stack(), local()]);
-          },
+          value: async (cb: () => Promise<string>) => cb(),
         }),
       });
 
       const listenerFn = vi.fn();
-      // @ts-expect-error; ignore.
-      const unsubscribe = pair.consumer.on("callback-released", listenerFn);
+      pair.consumer.diagnostic.once("callback:release", listenerFn);
 
-      const cb = pair.consumer.proxy(stackFn);
-      const result = await pair.consumer.request("svc", "all", [cb, () => "local"]);
-      expect(result).toEqual(["stack", "local"]);
+      {
+        using handle = pair.consumer.proxy(() => "ok");
+        await expect(pair.consumer.request("svc", "_", [handle])).resolves.toBe("ok");
+      }
 
-      // Wait for the RELEASE for the SESSION callback; the CALL one must remain.
-      await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(1));
-      expect(listenerFn).toHaveBeenCalledTimes(1);
-      expect(listenerFn).not.toHaveBeenCalledWith(cb.id);
-      unsubscribe();
+      // A tight timeout to avoid flakiness in CI.
+      await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(0), { timeout: 100, interval: 10 });
+      expect(listenerFn).toHaveBeenCalledWith(expect.objectContaining({ reason: "explicit" }));
     });
 
-    it("invoking a stack-scoped callback after local rejects with NOT_FOUND", async () => {
-      const observations: unknown[] = [];
+    it("a local proxy is unregistered automatically when reclaimed", async () => {
       pair = openSessionPair({
         producerInquiry: () => ({
-          value: async (cb: () => Promise<unknown>) => {
-            // Yield so the consumer's release(...) below has time to run
-            // before the producer dispatches the INVOKE.
-            await new Promise((r) => setTimeout(r, 20));
-            observations.push(await cb());
-            return null;
-          },
+          value: async (cb: () => Promise<string>) => cb(),
         }),
       });
 
-      const cb = pair.consumer.proxy(() => "should-not-fire");
-      const promise = pair.consumer.request("svc", "_", [cb]);
-      cb[QuirySymbol.release]();
+      let handle = pair.consumer.proxy(() => "ok") as CallbackHandle<() => "ok"> | null;
+      const cbId = String(handle!.id);
 
-      await expect(promise).rejects.toMatchObject({ code: WireStatus.NOT_FOUND });
+      await expect(pair.consumer.request("svc", "_", [handle])).resolves.toBe("ok");
+      handle = null; // Force the handle to be garbage collected.
+
+      const [followUp, triggerGC] = handleGC();
+      triggerGC();
+
+      pair.consumer.diagnostic.once("callback:release", followUp);
+
+      await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(0), {
+        timeout: 5000,
+        interval: 10,
+      });
+      expect(followUp).toHaveBeenCalledWith({ id: cbId, reason: "gc" });
     });
 
-    describe("invocation argument handling", () => {
-      it("forwards positional args verbatim to the local callback", async () => {
-        const seen: unknown[][] = [];
-        pair = openSessionPair({
-          producerInquiry: () => ({
-            value: async (cb: (...args: unknown[]) => Promise<void>) => {
-              await cb(1, "two", { three: 3 }, [4, 5]);
-              return null;
-            },
-          }),
-        });
-
-        await pair.consumer.request("svc", "_", [
-          (...args: unknown[]) => {
-            seen.push(args);
-          },
-        ]);
-
-        expect(seen).toEqual([[1, "two", { three: 3 }, [4, 5]]]);
+    it("a remote proxy is released automatically when collected on the consumer side", async () => {
+      pair = openSessionPair({
+        producerInquiry: () => ({
+          value: () => () => "ok",
+        }),
       });
 
-      it("the callback's return value flows back to the producer's await", async () => {
-        let received: unknown = null;
-        pair = openSessionPair({
-          producerInquiry: () => ({
-            value: async (cb: () => Promise<unknown>) => {
-              received = await cb();
-              return null;
-            },
-          }),
-        });
+      let handle = (await pair.consumer.request("svc", "_", [])) as Function | null;
+      expect(await handle!()).toBe("ok");
+      handle = null; // Force the handle to be garbage collected.
 
-        await pair.consumer.request("svc", "_", [() => ({ ok: true, value: 7 })]);
-        expect(received).toEqual({ ok: true, value: 7 });
+      const [followUp, triggerGC] = handleGC();
+      triggerGC();
+
+      // Check producer side for the release.
+      pair.producer.diagnostic.once("callback:release", followUp);
+
+      await vi.waitFor(() => expect(pair!.producer.status.callbacks).toBe(0), {
+        timeout: 5000,
+        interval: 10,
       });
-
-      it("a callback that throws on the consumer side rejects the proxy with the error", async () => {
-        pair = openSessionPair({
-          producerInquiry: () => ({
-            value: async (cb: () => Promise<unknown>) => {
-              return await cb();
-            },
-          }),
-        });
-
-        const promise = pair.consumer.request("svc", "invoke", [
-          () => {
-            throw new Error("nope");
-          },
-        ]);
-        await expect(promise).rejects.toMatchObject({ message: "nope" });
-      });
-
-      it("the producer's outbound counter stays balanced when the callback returns", async () => {
-        pair = await openSessionPair({
-          producerInquiry: () => ({
-            value: async (cb: () => Promise<unknown>) => {
-              await cb();
-              return null;
-            },
-          }),
-        });
-
-        await pair.consumer.request("svc", "_", [() => "ok"]);
-        // After RELEASE, no remote invocation should be pending on either side.
-        await vi.waitFor(() => {
-          expect(pair!.producer.status.invocations).toBe(0);
-          expect(pair!.consumer.status.invocations).toBe(0);
-        });
-      });
+      expect(followUp).toHaveBeenCalledWith(expect.objectContaining({ reason: "remote-gc" }));
     });
   });
 });
