@@ -1,12 +1,13 @@
 import { WireStatus } from "~/interface/protocol";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
-import type { CallbackHandle } from "~/core/session";
+import type { Callback } from "~/core/session";
 import type { Remote } from "~/interface/transformers";
 
 import * as QuirySymbol from "~/core/infra/symbol";
 
 import { runGCPressure } from "./helpers/garbage-collection";
+import type { RemoteCallback } from "~/core/infra/channel/callback-bridge";
 
 /**
  * Tests for the Session's support of callback functions as
@@ -168,7 +169,7 @@ describe("Session callbacks", () => {
     // Wait for the RELEASE for the SESSION callback; the CALL one must remain.
     await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(1));
     expect(listenerFn).toHaveBeenCalledTimes(1);
-    expect(listenerFn).not.toHaveBeenCalledWith(cb.id);
+    expect(listenerFn).not.toHaveBeenCalledWith(cb[QuirySymbol.identifier]);
   });
 
   it("a callback that throws on the consumer side rejects the proxy with the error", async () => {
@@ -195,11 +196,12 @@ describe("Session callbacks", () => {
       }),
     });
 
-    const func = (await pair.consumer.request("svc", "_", [])) as CallbackHandle<() => Promise<string>>;
+    const func = (await pair.consumer.request("svc", "_", [])) as RemoteCallback;
     expect(typeof func).toBe("function");
+    expect(func[QuirySymbol.identifier]).toBeDefined();
     expect(await func()).toBe("ok");
 
-    pair.producer.callbacks.releaseSessionCallbacks();
+    func[QuirySymbol.release]();
   });
 
   it("object returns are walked through and their functions are substituted as callback proxies", async () => {
@@ -213,16 +215,15 @@ describe("Session callbacks", () => {
     const result = (await pair.consumer.request("svc", "_", [])) as Remote<ReturnType<typeof fn>>;
     expect(typeof result).toBe("object");
     expect(typeof result.first).toBe("function");
-    expect(typeof result.second).toBe("function");
     expect(typeof result.deep.third).toBe("function");
 
     expect(await result.first()).toBe(1);
     expect(await result.second()).toBe(2);
     expect(await result.deep.third()).toBe(3);
 
-    // Release the proxies.
+    // Release the proxies on the producer side; this is were they are defined.
     pair.producer.callbacks.releaseSessionCallbacks();
-    expect(pair!.producer.status.callbacks).toBe(0);
+    await vi.waitFor(() => expect(pair!.producer.status.callbacks).toBe(0), { timeout: 100, interval: 10 });
   });
 
   describe("automatic callback cleanup", () => {
@@ -268,21 +269,23 @@ describe("Session callbacks", () => {
         }),
       });
 
-      let handle = pair.consumer.proxy(() => "ok") as CallbackHandle<() => "ok"> | null;
-      const cbId = String(handle!.id);
+      // Defined on consumer side.
+      let handle = pair.consumer.proxy(() => "ok") as RemoteCallback | null;
+      const cbId = String(handle![QuirySymbol.identifier]);
 
       await expect(pair.consumer.request("svc", "_", [handle])).resolves.toBe("ok");
       handle = null; // Force the handle to be garbage collected.
 
       const [followUp, triggerGC] = handleGC();
-      triggerGC();
 
       pair.consumer.diagnostic.once("callback:release", followUp);
+      triggerGC();
 
       await vi.waitFor(() => expect(pair!.consumer.status.callbacks).toBe(0), {
         timeout: 5000,
         interval: 10,
       });
+      expect(followUp).toHaveBeenCalledTimes(1); // This is in case of double release; should be only once.
       expect(followUp).toHaveBeenCalledWith({ id: cbId, reason: "gc" });
     });
 
@@ -293,21 +296,24 @@ describe("Session callbacks", () => {
         }),
       });
 
-      let handle = (await pair.consumer.request("svc", "_", [])) as Function | null;
+      let handle = (await pair.consumer.request("svc", "_", [])) as Callback | null;
+      const cbId = String(handle![QuirySymbol.identifier]);
+
       expect(await handle!()).toBe("ok");
       handle = null; // Force the handle to be garbage collected.
 
       const [followUp, triggerGC] = handleGC();
-      triggerGC();
 
       // Check producer side for the release.
       pair.producer.diagnostic.once("callback:release", followUp);
+      triggerGC();
 
       await vi.waitFor(() => expect(pair!.producer.status.callbacks).toBe(0), {
         timeout: 5000,
         interval: 10,
       });
-      expect(followUp).toHaveBeenCalledWith(expect.objectContaining({ reason: "remote-gc" }));
+      expect(followUp).toHaveBeenCalledTimes(1);
+      expect(followUp).toHaveBeenCalledWith({ id: cbId, reason: "remote-gc" });
     });
   });
 });

@@ -7,6 +7,11 @@
 export const serialize: unique symbol = Symbol("quiry.serialize");
 
 /**
+ * A symbol used to identify an quiry structured value. Used for debugging.
+ */
+export const identifier: unique symbol = Symbol("quiry.identifier");
+
+/**
  * A symbol used to call the release method on a callback.
  * Used for explicit resource management.
  */

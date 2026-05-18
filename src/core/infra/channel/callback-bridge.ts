@@ -4,7 +4,7 @@ import * as QuirySymbol from "../symbol";
 import { WireKind, WireStatus } from "../../../interface/protocol";
 import type { CallbackId, CorrelationId, InvocationId } from "../../../interface/types";
 
-import { type Callback, CallbackRegistry, CallbackScope, isCallbackStub } from "../../../lib/callbacks";
+import { type CallbackStub, CallbackRegistry, CallbackScope, isCallbackStub } from "../../../lib/callbacks";
 import { InFlightTracker, RefScopedTracker } from "../../../lib/tracker";
 
 import { SessionState } from "../../infra/state";
@@ -17,10 +17,15 @@ import { isPlainObject } from "../../../lib/helpers";
  * A wrapper around a callback function that provides a release method
  * and a dispose symbol for explicit resource management.
  */
-export type CallbackHandle<T extends Function> = T & {
-  id: CallbackId;
+export type Callback<T extends Function = () => unknown> = T & {
+  [QuirySymbol.identifier]: CallbackId;
   [QuirySymbol.release](): boolean;
   [Symbol.dispose](): void;
+};
+
+export type RemoteCallback<T extends Function = () => unknown> = T & {
+  [QuirySymbol.identifier]: CallbackId;
+  [QuirySymbol.release](): void;
 };
 
 interface PendingCallbackInvocation<T = unknown> {
@@ -91,7 +96,7 @@ export class CallbackBridge {
   }
 
   /**
-   * Rebuilds the argument list on the receiver side: replaces each {@link Callback} stub
+   * Rebuilds the argument list on the receiver side: replaces each {@link CallbackStub} stub
    * found anywhere in the graph with a live async function that sends `CBK:INVOKE`
    * and awaits `CBK:RETURN`.
    *
@@ -102,7 +107,7 @@ export class CallbackBridge {
    * Cycles are short-circuited via the `seen` map.
    */
   restoreStubs<T>(value: T, ref: CorrelationId | null = null): T {
-    const track = (stub: Callback): CallbackId => {
+    const track = (stub: CallbackStub): CallbackId => {
       if (ref === null || stub.scope === CallbackScope.SESSION) return stub.id;
       let set = this.#remote_stubs.get(ref);
       if (!set) {
@@ -149,7 +154,7 @@ export class CallbackBridge {
    * through serialization to the existing stub. Released explicitly,
    * via `[Symbol.dispose]`, or on local GC.
    */
-  proxy<T extends Function>(fn: T): CallbackHandle<T> {
+  proxy<T extends Function>(fn: T): Callback<T> {
     const callback = this.registry.bind(fn);
     const release = (): boolean => {
       const ok = this.registry.release(callback.id);
@@ -168,7 +173,7 @@ export class CallbackBridge {
     });
 
     this.localFinalization.register(handle, callback.id);
-    return handle as unknown as CallbackHandle<T>;
+    return handle as unknown as Callback<T>;
   }
 
   // --------- PACKET HANDLING --------- //
@@ -391,8 +396,8 @@ export class CallbackBridge {
     id: CallbackId,
     ref: CorrelationId | null,
     scope: CallbackScope,
-  ): (...args: unknown[]) => Promise<unknown> {
-    return (...args: unknown[]): Promise<unknown> => {
+  ): RemoteCallback<(...args: unknown[]) => Promise<unknown>> {
+    const handle = (...args: unknown[]): Promise<unknown> => {
       const eid = `${id}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
 
       const timeout = scope === CallbackScope.SESSION ? null : this.config.defaultTimeout;
@@ -469,6 +474,26 @@ export class CallbackBridge {
 
       return promise;
     };
+
+    const release = () => {
+      this.remoteFinalization.unregister(handle);
+      void this.ctx
+        .send<Packets.CallbackReleasePacket>({
+          kind: WireKind.CALLBACK,
+          type: Packets.CallbackMessageType.RELEASE,
+          payload: { ref, callbacks: [id], gc: true },
+        })
+        .catch(() => {});
+    };
+
+    // Add debug symbols to the handle.
+    Object.defineProperties(handle, {
+      [QuirySymbol.identifier]: { value: id, enumerable: false, writable: false },
+      [QuirySymbol.release]: { value: release, enumerable: false },
+    });
+
+    if (ref === null) this.remoteFinalization.register(handle, id);
+    return handle as unknown as RemoteCallback<typeof handle>;
   }
 
   /**

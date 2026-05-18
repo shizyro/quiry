@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
  */
 const stub = "quiry.callback.stub" as const;
 
-export interface Callback {
+export interface CallbackStub {
   readonly [stub]: true;
   readonly id: CallbackId;
   readonly scope: CallbackScope;
@@ -25,7 +25,7 @@ export enum CallbackScope {
   SESSION,
 }
 
-export function isCallbackStub(value: unknown): value is Callback {
+export function isCallbackStub(value: unknown): value is CallbackStub {
   return typeof value === "object" && value !== null && stub in value;
 }
 
@@ -129,7 +129,7 @@ export class CallbackRegistry {
    *
    * Walks arrays and plain objects recursively; class instances and other non-plain
    * objects are returned as-is (they wouldn't survive structured cloning anyway).
-   * Already-substituted {@link Callback} stubs pass through untouched. Cycles are
+   * Already-substituted {@link CallbackStub} stubs pass through untouched. Cycles are
    * detected and short-circuited.
    */
   substitute<T>(value: T, ref?: CorrelationId): T {
@@ -140,7 +140,7 @@ export class CallbackRegistry {
       if (typeof block === "function") {
         // @ts-expect-error - `scope` is always `CallbackScope.CALL` or `CallbackScope.SESSION`
         const id = this.register(block, scope, ref);
-        return { [stub]: true, id, scope } satisfies Callback;
+        return { [stub]: true, id, scope } satisfies CallbackStub;
       }
 
       if (block === null || typeof block !== "object") return block;
@@ -172,9 +172,9 @@ export class CallbackRegistry {
   }
 
   /** Registers a function as a `SESSION`-scoped callback and returns a callback handle. */
-  bind(fn: Function): Callback {
+  bind(fn: Function): CallbackStub {
     const id = this.register(fn, CallbackScope.SESSION);
-    return { [stub]: true, id, scope: CallbackScope.SESSION } satisfies Callback;
+    return { [stub]: true, id, scope: CallbackScope.SESSION } satisfies CallbackStub;
   }
 
   get size(): number {
