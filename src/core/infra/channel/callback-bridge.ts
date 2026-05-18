@@ -54,7 +54,9 @@ export class CallbackBridge {
    * here before letting RELEASE go out for the same ref.
    */
   private readonly invocations = new RefScopedTracker<CorrelationId>();
-  private readonly finalization: FinalizationRegistry<CallbackId>;
+
+  private readonly localFinalization: FinalizationRegistry<CallbackId>;
+  private readonly remoteFinalization: FinalizationRegistry<CallbackId>;
 
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
   readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
@@ -63,15 +65,14 @@ export class CallbackBridge {
     private readonly ctx: BridgeContext,
     private readonly config: { defaultTimeout: number },
   ) {
-    this.finalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
+    this.localFinalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
       if (this.ctx.state() === SessionState.CLOSED) return;
       const released = this.registry.release(id);
-      if (released) {
-        this.ctx.diagnostic.maybe("callback:release")?.({ id, reason: "gc" });
-        return;
-      }
+      if (released) this.ctx.diagnostic.maybe("callback:release")?.({ id, reason: "gc" });
+    });
 
-      // No local entry; the wrapper was an inbound stub. Tell the peer.
+    this.remoteFinalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
+      if (this.ctx.state() === SessionState.CLOSED) return;
       void this.ctx
         .send<Packets.CallbackReleasePacket>({
           kind: WireKind.CALLBACK,
@@ -100,7 +101,7 @@ export class CallbackBridge {
    * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
    * Cycles are short-circuited via the `seen` map.
    */
-  restoreStubs<T>(value: T, ref: CorrelationId | null, finalize: boolean = false): T {
+  restoreStubs<T>(value: T, ref: CorrelationId | null = null): T {
     const track = (stub: Callback): CallbackId => {
       if (ref === null || stub.scope === CallbackScope.SESSION) return stub.id;
       let set = this.#remote_stubs.get(ref);
@@ -115,10 +116,7 @@ export class CallbackBridge {
     const seen = new WeakMap<object, unknown>();
     const walk = (val: unknown): unknown => {
       if (isCallbackStub(val)) {
-        const id = track(val);
-        const fn = this.#makeRemoteCallback(id, ref, val.scope);
-        if (finalize) this.finalization.register(fn, id);
-        return fn;
+        return this.#makeRemoteCallback(track(val), ref, val.scope);
       }
       if (val === null || typeof val !== "object") return val;
 
@@ -156,18 +154,20 @@ export class CallbackBridge {
     const release = (): boolean => {
       const ok = this.registry.release(callback.id);
       if (ok) this.ctx.diagnostic.maybe("callback:release")?.({ id: callback.id, reason: "explicit" });
+      this.localFinalization.unregister(callback);
       return ok;
     };
 
     const handle = (...args: unknown[]): unknown => (fn as unknown as (...a: unknown[]) => unknown)(...args);
     Object.defineProperties(handle, {
-      id: { value: callback.id, enumerable: false, writable: false },
-      [Symbol.dispose]: { value: release, enumerable: false },
+      [QuirySymbol.identifier]: { value: callback.id, enumerable: false, writable: false },
       [QuirySymbol.release]: { value: release, enumerable: false },
+      [Symbol.dispose]: { value: release, enumerable: false },
+      // A serialize field to survive the structured clone hop.
       [QuirySymbol.serialize]: { value: callback, enumerable: false },
     });
 
-    this.finalization.register(handle, callback.id);
+    this.localFinalization.register(handle, callback.id);
     return handle as unknown as CallbackHandle<T>;
   }
 
@@ -294,7 +294,9 @@ export class CallbackBridge {
       // Missing callback on release is idempotent and expected —
       // e.g. we released it locally first. Observable-only.
       const released = this.registry.release(id);
-      if (released) this.ctx.diagnostic.maybe("callback:release")?.({ id, reason });
+      if (released) {
+        this.ctx.diagnostic.maybe("callback:release")?.({ id, reason });
+      }
     }
   }
 
@@ -320,10 +322,10 @@ export class CallbackBridge {
   }
 
   /**
-   * Bulk-releases every SESSION-scoped local callback and notifies the peer.
+   * Bulk-releases every SESSION-scoped local callback.
    * Called once during drain after the peer has signaled it's done.
    */
-  async releaseSessionCallbacks(): Promise<void> {
+  releaseSessionCallbacks(): void {
     const released = this.registry.releaseSessionScoped();
     if (released.length === 0) return;
 
@@ -331,13 +333,7 @@ export class CallbackBridge {
       this.ctx.diagnostic.maybe("callback:release")?.({ id, reason: "scope" });
     }
 
-    await this.ctx
-      .send<Packets.CallbackReleasePacket>({
-        kind: WireKind.CALLBACK,
-        type: Packets.CallbackMessageType.RELEASE,
-        payload: { ref: null, callbacks: released },
-      })
-      .catch(() => {});
+    // Callbacks are local; no need to notify peer.
   }
 
   // --------- PUBLIC: LIFECYCLE --------- //
@@ -392,12 +388,12 @@ export class CallbackBridge {
    * unbounded (long-lived event handlers are the whole point).
    */
   #makeRemoteCallback(
-    callback: CallbackId,
+    id: CallbackId,
     ref: CorrelationId | null,
     scope: CallbackScope,
   ): (...args: unknown[]) => Promise<unknown> {
     return (...args: unknown[]): Promise<unknown> => {
-      const eid = `${callback}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
+      const eid = `${id}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
 
       const timeout = scope === CallbackScope.SESSION ? null : this.config.defaultTimeout;
       const promise = new Promise<unknown>((resolve, reject) => {
@@ -416,7 +412,7 @@ export class CallbackBridge {
                 `Remote callback did not return within ${timeout}ms`,
                 {
                   correlationId: ref ?? undefined,
-                  detail: { callback, eid, timeout },
+                  detail: { callback: id, eid, timeout },
                 },
               ),
             );
@@ -440,13 +436,13 @@ export class CallbackBridge {
         this.outbound.enter();
         if (ref) this.invocations.enter(ref);
 
-        this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, id: callback, ref });
+        this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, id, ref });
 
         void this.ctx
           .send<Packets.CallbackInvokePacket>({
             kind: WireKind.CALLBACK,
             type: Packets.CallbackMessageType.INVOKE,
-            payload: { ref, eid, callback, args },
+            payload: { ref, eid, callback: id, args },
           })
           .catch((error: unknown) => {
             const pending = this.#pending_invocations.get(eid);

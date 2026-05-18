@@ -38,7 +38,7 @@ export interface DrainCoordinatorDeps {
   readonly transport: DrainTransport;
   readonly inbound: { cancelAllStreams(): void; idle(): Promise<void> };
   readonly outbound: { cancelStreams(reason: string): void; idle(): Promise<void> };
-  readonly callbacks: { idle(): Promise<void>; releaseSessionCallbacks(): Promise<void> };
+  readonly callbacks: { idle(): Promise<void>; releaseSessionCallbacks(): void };
   /**
    * Tear-down hook. Runs in `finally` so failure of the protocol (timeout,
    * transport death, exception) still produces a clean session close.

@@ -546,7 +546,7 @@ export class OutboundRequests {
     }
 
     if (status === WireStatus.OK) {
-      entry.resolve(this.ctx.callbacks.restoreStubs(packet.payload.result, null, true));
+      entry.resolve(this.ctx.callbacks.restoreStubs(packet.payload.result));
     } else {
       // Reconstruct the remote error with its full cause chain.
       // The `origin` on the rebuilt error reflects the remote node.
