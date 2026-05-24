@@ -2,8 +2,16 @@
  * @license Copyright 2026 Shizuka Yashiro
  */
 
-import { fork as NJSFork, type ForkOptions as NJSForkOptions } from "node:child_process";
-import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
+import {
+  fork as NJSFork,
+  ChildProcess as NJSChildProcess,
+  type ForkOptions as NJSForkOptions,
+} from "node:child_process";
+import {
+  isMainThread,
+  Worker as NJSWorker,
+  type WorkerOptions as NJSWorkerOptions,
+} from "node:worker_threads";
 
 import { EventEmitter } from "node:events";
 
@@ -57,6 +65,16 @@ export function on<K extends keyof QuiryEvents>(
 
 // --------- PUBLIC API: PERSISTENCE --------- //
 
+export function parent(): PeerConnection {
+  if (isMainThread) {
+    if (typeof process.send === "function") return attach(new ChildProcessTransport());
+  } else return attach(new WorkerThreadsTransport());
+
+  throw new ReferenceError(
+    "Failed to create transport for parent; are you sure this is running in a worker thread or child process?",
+  );
+}
+
 /** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
 export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
   const subprocess = NJSFork(filename, options);
@@ -67,6 +85,14 @@ export function fork(filename: string | URL, options: NJSForkOptions = {}): Peer
 export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
   const worker = new NJSWorker(filename, options);
   return attach(new WorkerThreadsTransport(worker));
+}
+
+/** Automatically wrap a port in a transport and attach it as a new peer. */
+export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
+  if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port));
+  if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port));
+
+  throw new TypeError("Invalid port; must be a child process or worker thread");
 }
 
 export function attach<TServices extends ServiceRegistry = {}>(
