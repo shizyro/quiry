@@ -257,4 +257,4 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
 export type { RetryPolicy, RequestControl } from "./interface/protocol";
-export * as QuirySymbol from "./core/infra/symbol";
+export * from "./core/symbol";

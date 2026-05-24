@@ -5,7 +5,7 @@ import type { ServiceRegistry, ServiceImpl } from "./interface/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
 import { WireStatus, type RequestControl } from "./interface/protocol";
 
-import * as QuirySymbol from "./core/infra/symbol";
+import * as QuirySymbol from "./core/symbol";
 
 export type PeerIdentifier = string;
 

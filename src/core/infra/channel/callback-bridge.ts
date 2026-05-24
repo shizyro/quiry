@@ -1,5 +1,5 @@
 import * as Packets from "../../../interface/packets";
-import * as QuirySymbol from "../symbol";
+import * as QuirySymbol from "../../symbol";
 
 import { WireKind, WireStatus } from "../../../interface/protocol";
 import type { CallbackId, CorrelationId, InvocationId } from "../../../interface/types";

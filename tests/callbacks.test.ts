@@ -4,7 +4,7 @@ import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 import type { Callback } from "~/core/session";
 import type { Remote } from "~/interface/transformers";
 
-import * as QuirySymbol from "~/core/infra/symbol";
+import * as QuirySymbol from "~/core/symbol";
 
 import { runGCPressure } from "./helpers/garbage-collection";
 import type { RemoteCallback } from "~/core/infra/channel/callback-bridge";
