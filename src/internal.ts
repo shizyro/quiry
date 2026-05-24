@@ -1,4 +1,4 @@
-import type { Session, CallbackHandle } from "./core/session";
+import type { Session, Callback } from "./core/session";
 import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/errors";
 
 import type { ServiceRegistry, ServiceImpl } from "./interface/types";
@@ -15,6 +15,10 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
     readonly identifier: PeerIdentifier,
     private readonly session: Session,
   ) {}
+
+  get diagnostic(): typeof this.session.diagnostic {
+    return this.session.diagnostic;
+  }
 
   service<TOverride extends ServiceImpl = never, TName extends string = string>(
     name: TName,
@@ -41,7 +45,7 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
    * Make a callback handle that can be manually released, or disposed out of scope.
    * This is useful for long-lived callbacks, like event handlers.
    */
-  callback<T extends Function>(fn: T): CallbackHandle<T> {
+  callback<T extends Function>(fn: T): Callback<T> {
     if (typeof fn !== "function")
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
     if (QuirySymbol.serialize in fn)
