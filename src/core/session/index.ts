@@ -439,6 +439,12 @@ export class Session {
       kind: "terminate",
       message: reason ?? "transport closed",
     });
+
+    // The transport closed on its own (peer exited, IPC channel dropped)
+    // without us going through the drain protocol. Outside of an active
+    // drain, nothing else observes this — tear the session down so
+    // pending work fails fast and `terminate` fires for peer bookkeeping.
+    this.terminate(reason ?? "transport closed");
   };
 
   private readonly onTransportError = ({ message, kind, cause }: TransportError): void => {
@@ -465,7 +471,10 @@ export class Session {
     }
 
     this.diagnostic.maybe("transport:error")?.({ kind, message: error.message });
-    this.emitter.emit("error", error);
+    if (this.emitter.listenerCount("error") > 0) this.emitter.emit("error", error);
+
+    // A transport-level error means the channel is no longer usable.
+    this.terminate(error.message);
   };
 }
 
