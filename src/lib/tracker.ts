@@ -1,6 +1,8 @@
 /** Tracks in-flight operations and allows awaiting a "drain to zero" condition. */
 export class InFlightTracker {
   #inflight: number = 0;
+  /** Set once `drain()` runs; late `exit()` calls become no-ops instead of underflow errors. */
+  #drained: boolean = false;
   readonly #resolvers: Array<() => void> = [];
 
   enter(): void {
@@ -8,6 +10,10 @@ export class InFlightTracker {
   }
 
   exit(): void {
+    // Teardown already reset counters and forfeited pairing guarantees;
+    // an `enter()` whose matching `exit()` resolves after `drain()` is
+    // expected, not a bug.
+    if (this.#drained) return;
     if (this.#inflight <= 0) throw new Error("Tracker underflow (exit without matching enter)");
 
     this.#inflight--;
@@ -49,9 +55,11 @@ export class InFlightTracker {
 
   /**
    * Resets the in-flight count to zero without pairing `exit` calls — use for teardown only;
-   * resolves all pending {@link InFlightTracker.idle} waiters.
+   * resolves all pending {@link InFlightTracker.idle} waiters. After this, further `exit()`
+   * calls are no-ops (see `#drained`).
    */
   drain(): void {
+    this.#drained = true;
     this.#inflight = 0;
     const resolvers = this.#resolvers.splice(0);
     for (const resolve of resolvers) resolve();
@@ -66,12 +74,16 @@ export class InFlightTracker {
 export class RefScopedTracker<K> {
   readonly #counts = new Map<K, number>();
   readonly #waiters = new Map<K, Array<() => void>>();
+  /** Set once `drain()` runs; late `exit()` calls become no-ops instead of underflow errors. */
+  #drained: boolean = false;
 
   enter(key: K): void {
     this.#counts.set(key, (this.#counts.get(key) ?? 0) + 1);
   }
 
   exit(key: K): void {
+    if (this.#drained) return;
+
     const n = this.#counts.get(key);
     if (n === undefined || n <= 0)
       throw new Error("RefScopedTracker underflow (exit without matching enter)");
@@ -127,9 +139,11 @@ export class RefScopedTracker<K> {
 
   /**
    * Resets every key's count to zero and resolves all pending waiters — use
-   * for teardown only; subsequent `exit` calls will underflow.
+   * for teardown only; after this, further `exit()` calls are no-ops (see
+   * `#drained`).
    */
   drain(): void {
+    this.#drained = true;
     this.#counts.clear();
     const allWaiters = Array.from(this.#waiters.values());
     this.#waiters.clear();

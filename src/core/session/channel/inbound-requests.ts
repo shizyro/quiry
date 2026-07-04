@@ -122,11 +122,11 @@ export class InboundRequests {
           type: Packets.ResponseMessageType.VALUE,
           payload: {
             ref: packet.id,
-            status: WireStatus.CANCELLED,
+            status: WireStatus.DRAINING,
             error: toWireError(new QuiryError(WireStatus.DRAINING, "Session is draining", context)),
           },
         });
-        settled(WireStatus.CANCELLED);
+        settled(WireStatus.DRAINING);
         return;
       }
 
