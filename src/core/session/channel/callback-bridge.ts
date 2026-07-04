@@ -481,7 +481,7 @@ export class CallbackBridge {
         .send<Packets.CallbackReleasePacket>({
           kind: WireKind.CALLBACK,
           type: Packets.CallbackMessageType.RELEASE,
-          payload: { ref, callbacks: [id], gc: true },
+          payload: { ref, callbacks: [id], gc: false },
         })
         .catch(() => {});
     };
