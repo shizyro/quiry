@@ -1,10 +1,10 @@
-import * as Packets from "../../../interface/packets";
-import { WireKind, WireStatus } from "../../../interface/protocol";
-import type { CorrelationId } from "../../../interface/types";
+import * as Packets from "../../../protocol/packets";
+import { WireKind, WireStatus } from "../../../protocol/wire";
+import type { CorrelationId } from "../../../protocol/types";
 
 import { InFlightTracker } from "../../../lib/tracker";
 
-import { QuiryError, toWireError } from "../../../shared/errors";
+import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
 import { abortable, timeout } from "../../../lib/utils";
 

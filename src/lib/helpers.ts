@@ -1,5 +1,5 @@
-import type { AnyPacket } from "../interface/packets";
-import * as QuirySymbol from "../core/symbol";
+import type { AnyPacket } from "../protocol/packets";
+import * as QuirySymbol from "../core/symbols";
 
 /**
  * Whether `value` can survive a structured-clone hop across a thread or

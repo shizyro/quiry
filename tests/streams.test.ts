@@ -1,5 +1,5 @@
-import { WireStatus } from "~/interface/protocol";
-import { QuiryError } from "~/shared/errors";
+import { WireStatus } from "~/protocol/wire";
+import { QuiryError } from "~/protocol/errors";
 
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 

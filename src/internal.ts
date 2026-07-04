@@ -1,11 +1,11 @@
 import type { Session, Callback } from "./core/session";
-import { attachCallerStack, captureCallerStack, QuiryError } from "./shared/errors";
+import { attachCallerStack, captureCallerStack, QuiryError } from "./protocol/errors";
 
-import type { ServiceRegistry, ServiceImpl } from "./interface/types";
+import type { ServiceRegistry, ServiceImpl } from "./protocol/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
-import { WireStatus, type RequestControl } from "./interface/protocol";
+import { WireStatus, type RequestControl } from "./protocol/wire";
 
-import * as QuirySymbol from "./core/symbol";
+import * as QuirySymbol from "./core/symbols";
 
 export type PeerIdentifier = string;
 

@@ -1,7 +1,7 @@
 import type { SessionEvents } from "../../interface/diagnostics";
 import type { DiagnosticBus } from "../../lib/diagnostics";
-import type { CorrelationId } from "../../interface/types";
-import type { AnyTypedPacket } from "../../interface/packets";
+import type { CorrelationId } from "../../protocol/types";
+import type { AnyTypedPacket } from "../../protocol/packets";
 
 import type { SessionState } from "./state";
 import type { CallbackBridge } from "./channel/callback-bridge";

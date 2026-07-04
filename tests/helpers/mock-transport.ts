@@ -7,7 +7,7 @@ import {
 } from "~/core/transport";
 
 import { DeferredQueue } from "~/lib/queue";
-import type { AnyPacket } from "~/interface/packets";
+import type { AnyPacket } from "~/protocol/packets";
 
 interface MockEvents {
   open: [];

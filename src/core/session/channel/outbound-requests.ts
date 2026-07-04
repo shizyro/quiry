@@ -1,11 +1,11 @@
-import * as Packets from "../../../interface/packets";
-import { WireKind, WireStatus, type RetryPolicy, type RequestControl } from "../../../interface/protocol";
-import type { CorrelationId } from "../../../interface/types";
+import * as Packets from "../../../protocol/packets";
+import { WireKind, WireStatus, type RetryPolicy, type RequestControl } from "../../../protocol/wire";
+import type { CorrelationId } from "../../../protocol/types";
 
 import { AsyncQueue } from "../../../lib/queue";
 import { InFlightTracker } from "../../../lib/tracker";
 
-import { fromWireError, isRetryableStatus, QuiryError } from "../../../shared/errors";
+import { fromWireError, isRetryableStatus, QuiryError } from "../../../protocol/errors";
 import { isSerializable, unwrapSerialized } from "../../../lib/helpers";
 import { retryable } from "../../../lib/utils";
 
@@ -529,9 +529,9 @@ export class OutboundRequests {
     this.tracker.exit();
 
     if (entry.kind === "stream") {
-      // User tried calling a stream method as a unary call.
+      // User tried streaming a unary method.
       entry.queue.fail(
-        new QuiryError(status, "Cannot call a stream method as a unary call", {
+        new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot stream a unary method.", {
           correlationId: ref,
           detail: { packetId: packet.id },
         }),

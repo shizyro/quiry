@@ -1,13 +1,13 @@
-import { WireStatus } from "~/interface/protocol";
+import { WireStatus } from "~/protocol/wire";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
 import type { Callback } from "~/core/session";
 import type { Remote } from "~/interface/transformers";
 
-import * as QuirySymbol from "~/core/symbol";
+import * as QuirySymbol from "~/core/symbols";
 
 import { runGCPressure } from "./helpers/garbage-collection";
-import type { RemoteCallback } from "~/core/infra/channel/callback-bridge";
+import type { RemoteCallback } from "~/core/session/channel/callback-bridge";
 
 /**
  * Tests for the Session's support of callback functions as

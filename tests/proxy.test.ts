@@ -1,4 +1,4 @@
-import { WireStatus } from "~/interface/protocol";
+import { WireStatus } from "~/protocol/wire";
 
 import { PeerConnection } from "~/internal";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";

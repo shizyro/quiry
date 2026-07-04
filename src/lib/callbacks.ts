@@ -1,5 +1,5 @@
 import { isPlainObject } from "./helpers";
-import type { CallbackId, CorrelationId } from "../interface/types";
+import type { CallbackId, CorrelationId } from "../protocol/types";
 
 import { randomUUID } from "node:crypto";
 

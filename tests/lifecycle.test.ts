@@ -1,4 +1,4 @@
-import { WireStatus } from "~/interface/protocol";
+import { WireStatus } from "~/protocol/wire";
 import { Session, SessionState } from "~/core/session";
 
 import { pairTransports, type MockTransport } from "./helpers/mock-transport";

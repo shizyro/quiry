@@ -1,36 +1,36 @@
-import * as Packets from "../interface/packets";
-import { WireKind, WireStatus, type RequestControl, type RetryPolicy } from "../interface/protocol";
-import type { CorrelationId } from "../interface/types";
+import * as Packets from "../../protocol/packets";
+import { WireKind, WireStatus, type RequestControl, type RetryPolicy } from "../../protocol/wire";
+import type { CorrelationId } from "../../protocol/types";
 
 import { EventEmitter } from "node:events";
 
-import { Router } from "../lib/router";
-import { DiagnosticBus } from "../lib/diagnostics";
+import { Router } from "../../lib/router";
+import { DiagnosticBus } from "../../lib/diagnostics";
 import {
   DIAGNOSTIC_CHANNEL_PREFIX,
   type SessionEvents as DiagnosticSessionEvents,
-} from "../interface/diagnostics";
+} from "../../interface/diagnostics";
 
-import { QuiryError } from "../shared/errors";
+import { QuiryError } from "../../protocol/errors";
 import {
   TransportState,
   type Transport,
   type BackpressureSignal,
   type TransportError,
   BackpressureState,
-} from "./transport";
+} from "../transport";
 
-import { SessionState } from "./infra/state";
-import type { SessionContext } from "./infra/context";
-import type { InquiryFunc, InquiryRequest, InquiryDescriptor } from "./infra/inquiry";
+import { SessionState } from "./state";
+import type { SessionContext } from "./context";
+import type { InquiryFunc, InquiryRequest, InquiryDescriptor } from "./inquiry";
 
 export { SessionState };
 export type { Callback, InquiryDescriptor, InquiryFunc, InquiryRequest };
 
-import { InboundRequests } from "./infra/channel/inbound-requests";
-import { OutboundRequests } from "./infra/channel/outbound-requests";
-import { CallbackBridge, type Callback } from "./infra/channel/callback-bridge";
-import { DrainCoordinator } from "./infra/channel/drain-coordinator";
+import { InboundRequests } from "./channel/inbound-requests";
+import { OutboundRequests } from "./channel/outbound-requests";
+import { CallbackBridge, type Callback } from "./channel/callback-bridge";
+import { DrainCoordinator } from "./channel/drain-coordinator";
 
 import { randomBytes } from "node:crypto";
 

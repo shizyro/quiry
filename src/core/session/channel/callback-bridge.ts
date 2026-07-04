@@ -1,16 +1,16 @@
-import * as Packets from "../../../interface/packets";
-import * as QuirySymbol from "../../symbol";
+import * as Packets from "../../../protocol/packets";
+import * as QuirySymbol from "../../symbols";
 
-import { WireKind, WireStatus } from "../../../interface/protocol";
-import type { CallbackId, CorrelationId, InvocationId } from "../../../interface/types";
+import { WireKind, WireStatus } from "../../../protocol/wire";
+import type { CallbackId, CorrelationId, InvocationId } from "../../../protocol/types";
 
 import { type CallbackStub, CallbackRegistry, CallbackScope, isCallbackStub } from "../../../lib/callbacks";
 import { InFlightTracker, RefScopedTracker } from "../../../lib/tracker";
 
-import { SessionState } from "../../infra/state";
+import { SessionState } from "../state";
 import type { SessionContext } from "../context";
 
-import { fromWireError, QuiryError, toWireError } from "../../../shared/errors";
+import { fromWireError, QuiryError, toWireError } from "../../../protocol/errors";
 import { isPlainObject } from "../../../lib/helpers";
 
 /**

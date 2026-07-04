@@ -1,4 +1,4 @@
-import type { WireKind, WirePacket, WireError, WireStatus, RequestControl } from "./protocol";
+import type { WireKind, WirePacket, WireError, WireStatus, RequestControl } from "./wire";
 import type { CorrelationId, InvocationId, CallbackId } from "./types";
 
 /** Typed wire packet with message type discrimination. */

@@ -9,7 +9,7 @@ import {
 
 import { DeferredQueue } from "../../lib/queue";
 import { isWirePacket, collectTransferables } from "../../lib/helpers";
-import type { AnyPacket } from "../../interface/packets";
+import type { AnyPacket } from "../../protocol/packets";
 
 const BACKPRESSURE_HIGH: number = 100; // packets
 const BACKPRESSURE_CRITICAL: number = 500;

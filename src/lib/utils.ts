@@ -1,5 +1,5 @@
-import { QuiryError } from "../shared/errors";
-import { WireStatus } from "../interface/protocol";
+import { WireStatus } from "../protocol/wire";
+import { QuiryError } from "../protocol/errors";
 
 // Timing utilities
 

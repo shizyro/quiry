@@ -15,13 +15,13 @@ import {
 
 import { EventEmitter } from "node:events";
 
-import { QuiryError } from "./shared/errors";
+import { QuiryError } from "./protocol/errors";
 import { type InquiryDescriptor, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
 import { PeerConnection, type PeerIdentifier } from "./internal";
 
-import { WireStatus } from "./interface/protocol";
-import type { AnyPacket } from "./interface/packets";
-import type { ServiceImpl, ServiceRegistry } from "./interface/types";
+import { WireStatus } from "./protocol/wire";
+import type { AnyPacket } from "./protocol/packets";
+import type { ServiceImpl, ServiceRegistry } from "./protocol/types";
 
 import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
@@ -256,5 +256,5 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
-export type { RetryPolicy, RequestControl } from "./interface/protocol";
-export * from "./core/symbol";
+export type { RetryPolicy, RequestControl } from "./protocol/wire";
+export * from "./core/symbols";

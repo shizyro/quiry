@@ -8,8 +8,8 @@
  * subscribe without coupling to Quiry internals.
  */
 
-import type { WireStatus } from "./protocol";
-import type { CallbackId, CorrelationId, InvocationId } from "./types";
+import type { WireStatus } from "../protocol/wire";
+import type { CallbackId, CorrelationId, InvocationId } from "../protocol/types";
 
 type SessionStateLiteral = "open" | "draining" | "closed";
 type TransportErrorKind = "send" | "receive" | "terminate";

@@ -1,6 +1,6 @@
-import * as Packets from "../../../interface/packets";
-import { WireKind } from "../../../interface/protocol";
-import type { CorrelationId } from "../../../interface/types";
+import * as Packets from "../../../protocol/packets";
+import { WireKind } from "../../../protocol/wire";
+import type { CorrelationId } from "../../../protocol/types";
 
 import type { DiagnosticBus } from "../../../lib/diagnostics";
 import type { SessionEvents } from "../../../interface/diagnostics";
