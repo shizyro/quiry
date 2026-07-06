@@ -65,7 +65,7 @@ export class InboundRequests {
       this.controllers.get(packet.payload.ref)?.abort();
       this.ctx.diagnostic.maybe("inquiry:received")?.({
         ref: packet.id,
-        service: "",
+        object: "",
         property: "",
         kind: "abort",
       });
@@ -81,7 +81,7 @@ export class InboundRequests {
 
       this.ctx.diagnostic.maybe("inquiry:received")?.({
         ref: packet.id,
-        service: "",
+        object: "",
         property: "",
         kind: "cancel",
       });
@@ -103,7 +103,7 @@ export class InboundRequests {
 
       this.ctx.diagnostic.maybe("inquiry:received")?.({
         ref: packet.id,
-        service: packet.payload.service,
+        object: packet.payload.object,
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
         kind: reqKind,
       });
@@ -154,7 +154,7 @@ export class InboundRequests {
       // TODO: maybe something like a semaphore to limit the number of concurrent requests
 
       const request: InquiryRequest = {
-        service: packet.payload.service,
+        object: packet.payload.object,
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
       };
 

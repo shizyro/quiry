@@ -21,7 +21,7 @@ import { PeerConnection, type PeerIdentifier } from "./internal";
 
 import { WireStatus } from "./protocol/wire";
 import type { AnyPacket } from "./protocol/packets";
-import type { ServiceImpl, ServiceRegistry } from "./protocol/types";
+import type { RemoteImpl, RemoteRegistry } from "./protocol/types";
 
 import type { Transport } from "./core/transport";
 import { ChildProcessTransport } from "./core/transport/impl/child-process";
@@ -36,7 +36,7 @@ import {
 import { fetchDescriptor } from "./lib/helpers";
 import { randomBytes } from "node:crypto";
 
-const registry = new Map<string, ServiceImpl>();
+const registry = new Map<string, RemoteImpl>();
 const peers = new Map<PeerIdentifier, PeerConnection>();
 
 export interface QuiryEvents {
@@ -95,9 +95,9 @@ export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
   throw new TypeError("Invalid port; must be a child process or worker thread");
 }
 
-export function attach<TServices extends ServiceRegistry = {}>(
+export function attach<TObjects extends RemoteRegistry = {}>(
   transport: Transport<AnyPacket>,
-): PeerConnection<TServices> {
+): PeerConnection<TObjects> {
   const session = new Session(transport, handleInquiry, {}).open();
   const identifier = randomBytes(4).toString("hex");
   const connection = new PeerConnection(identifier, session);
@@ -116,7 +116,7 @@ export function attach<TServices extends ServiceRegistry = {}>(
 
   emitter.emit("peer-connected", connection);
   diagnostic.maybe("peer:attached")?.({ identifier });
-  return connection as unknown as PeerConnection<TServices>;
+  return connection as unknown as PeerConnection<TObjects>;
 }
 
 export async function detach(identifier: PeerIdentifier, kill: boolean = false): Promise<void> {
@@ -134,12 +134,12 @@ export function peer(identifier: PeerIdentifier): PeerConnection | undefined {
   return peers.get(identifier);
 }
 
-// --------- PUBLIC API: SERVICE REGISTRATION --------- //
+// --------- PUBLIC API: REMOTE REGISTRATION --------- //
 
 type NonCtor<T> = T extends new (...args: any[]) => any ? never : T;
 
 /**
- * Register a service under `name` so it can be later resolved by remote peers.
+ * Register a remote object under `name` so it can be later resolved by remote peers.
  * A function is treated as a lazy factory and invoked exactly once on
  * registration. Anything else is registered as-is.
  *
@@ -151,18 +151,18 @@ type NonCtor<T> = T extends new (...args: any[]) => any ? never : T;
  * @throws A {@link QuiryError} `INVALID_ARGUMENT` if the implementation does
  *   not resolve to an object (e.g. a factory returning a primitive).
  */
-export function expose<T extends ServiceImpl>(name: string, factory: () => T): T;
-export function expose<T extends ServiceImpl>(name: string, value: NonCtor<T>): T;
-export function expose(name: string, valueOrFactory: ServiceImpl | (() => ServiceImpl)): ServiceImpl {
+export function expose<T extends RemoteImpl>(name: string, factory: () => T): T;
+export function expose<T extends RemoteImpl>(name: string, value: NonCtor<T>): T;
+export function expose(name: string, valueOrFactory: RemoteImpl | (() => RemoteImpl)): RemoteImpl {
   if (registry.has(name)) {
-    throw new QuiryError(WireStatus.FAILED_PRECONDITION, `Service "${name}" is already registered`);
+    throw new QuiryError(WireStatus.FAILED_PRECONDITION, `Remote object "${name}" is already registered`);
   }
 
   const impl = typeof valueOrFactory === "function" ? valueOrFactory() : valueOrFactory;
   if (impl === null || typeof impl !== "object") {
     throw new QuiryError(
       WireStatus.INVALID_ARGUMENT,
-      `Service "${name}" must resolve to an object (got ${impl === null ? "null" : typeof impl})`,
+      `Remote identifier "${name}" must resolve to an object (got ${impl === null ? "null" : typeof impl})`,
     );
   }
 
@@ -171,26 +171,26 @@ export function expose(name: string, valueOrFactory: ServiceImpl | (() => Servic
 }
 
 /**
- * Remove a service registration. In-flight peer requests against the
- * unexposed service fail with `NOT_FOUND`.
+ * Remove a remote object registration. In-flight peer requests against the
+ * unexposed object fail with `NOT_FOUND`.
  *
- * @returns `true` if the service was unregistered, `false` otherwise.
+ * @returns `true` if the object was unregistered, `false` otherwise.
  */
 export function unexpose(name: string): boolean {
   return registry.delete(name);
 }
 
-/** Resolve a registered service by name, or `undefined` if not registered. */
-export function get<T extends ServiceImpl = ServiceImpl>(name: string): T | undefined {
+/** Resolve a registered remote object by name, or `undefined` if not registered. */
+export function get<T extends RemoteImpl = RemoteImpl>(name: string): T | undefined {
   return registry.get(name) as T | undefined;
 }
 
-/** Whether a service is registered under `name`. */
+/** Whether a remote object is registered under `name`. */
 export function has(name: string): boolean {
   return registry.has(name);
 }
 
-/** Remove every service registration. Peer connections are not affected. */
+/** Remove every remote object registration. Peer connections are not affected. */
 export function clear(): void {
   registry.clear();
 }
@@ -199,15 +199,15 @@ export function clear(): void {
 
 function handleInquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
   const context = {
-    detail: { query: { service: request.service, property: request.property } },
+    detail: { query: { object: request.object, property: request.property } },
   };
 
-  const impl = registry.get(request.service);
-  if (!impl) throw new QuiryError(WireStatus.NOT_FOUND, `Service ${request.service} not found`, context);
+  const impl = registry.get(request.object);
+  if (!impl) throw new QuiryError(WireStatus.NOT_FOUND, `Remote object ${request.object} not found`, context);
   if (!(request.property in impl)) {
     throw new QuiryError(
       WireStatus.NOT_FOUND,
-      `Property ${request.property} does not exist in service ${request.service}`,
+      `Property ${request.property} does not exist in object ${request.object}`,
       context,
     );
   }
@@ -218,7 +218,7 @@ function handleInquiry(request: InquiryRequest): ReturnType<InquiryFunc> {
 function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): InquiryDescriptor<T> {
   const [target, descriptor] = fetchDescriptor(impl, key);
   if (!descriptor) {
-    throw new ReferenceError(`Property ${String(key)} does not exist in service ${String(impl)}`);
+    throw new ReferenceError(`Property ${String(key)} does not exist in object ${String(impl)}`);
   }
 
   const isData = "value" in descriptor;

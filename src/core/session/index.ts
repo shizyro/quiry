@@ -309,32 +309,32 @@ export class Session {
 
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
 
-  set(service: string, property: string, value: unknown): Promise<true> {
-    return this.outbound.set(service, property, value);
+  set(object: string, property: string, value: unknown): Promise<true> {
+    return this.outbound.set(object, property, value);
   }
 
-  get(service: string, property: string): Promise<unknown> {
-    return this.outbound.get(service, property);
+  get(object: string, property: string): Promise<unknown> {
+    return this.outbound.get(object, property);
   }
 
   request(
-    service: string,
+    object: string,
     method: string,
     args: ReadonlyArray<unknown>,
     control?: Omit<RequestControl, "abortable">,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    return this.outbound.request(service, method, args, control, signal);
+    return this.outbound.request(object, method, args, control, signal);
   }
 
   stream(
-    service: string,
+    object: string,
     method: string,
     args: ReadonlyArray<unknown>,
     control?: Omit<RequestControl, "abortable">,
     signal?: AbortSignal,
   ): AsyncIterableIterator<unknown> {
-    return this.outbound.stream(service, method, args, control, signal);
+    return this.outbound.stream(object, method, args, control, signal);
   }
 
   // --------- INTERNALS: ROUTING --------- //

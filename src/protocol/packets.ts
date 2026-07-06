@@ -24,7 +24,7 @@ export const RequestMessageType = {
 export type RequestMessageType = (typeof RequestMessageType)[keyof typeof RequestMessageType];
 
 export type GetPayload = {
-  readonly service: string;
+  readonly object: string;
   readonly property: string;
 };
 
@@ -32,7 +32,7 @@ export interface GetRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.GET, GetPayload> {}
 
 export type SetPayload = {
-  readonly service: string;
+  readonly object: string;
   readonly property: string;
   readonly value: unknown;
 };
@@ -41,7 +41,7 @@ export interface SetRequestPacket
   extends TypedWirePacket<typeof WireKind.REQUEST, typeof RequestMessageType.SET, SetPayload> {}
 
 export type CallPayload = {
-  readonly service: string;
+  readonly object: string;
   readonly method: string;
   readonly args: ReadonlyArray<unknown>;
   readonly control?: RequestControl;

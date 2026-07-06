@@ -35,7 +35,7 @@ describe("Session requests", () => {
     expect(result).toEqual({ echoed: ["sku-1", 3, { gift: true, tags: ["birthday"] }] });
 
     const seen = producerInquiry.mock.calls[0]![0];
-    expect(seen).toMatchObject({ service: "orders", property: "create" });
+    expect(seen).toMatchObject({ object: "orders", property: "create" });
   });
 
   it("keeps concurrent responses strictly correlated", async () => {

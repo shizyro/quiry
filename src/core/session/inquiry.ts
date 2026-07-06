@@ -6,7 +6,7 @@
 export type InquiryFunc = (request: InquiryRequest) => InquiryDescriptor;
 
 export interface InquiryRequest {
-  readonly service: string;
+  readonly object: string;
   readonly property: string;
 }
 

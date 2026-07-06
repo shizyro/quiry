@@ -13,7 +13,7 @@ import { SessionState } from "../state";
 import type { SessionContext } from "../context";
 
 interface RequestDiagnosticContext {
-  readonly service: string;
+  readonly object: string;
   readonly property: string;
   readonly timestamp: number;
 }
@@ -76,7 +76,7 @@ export class OutboundRequests {
 
   // --------- PUBLIC: REQUESTS --------- //
 
-  async set(service: string, property: string, value: unknown): Promise<true> {
+  async set(object: string, property: string, value: unknown): Promise<true> {
     if (this.ctx.state() !== SessionState.OPEN) {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
@@ -94,7 +94,7 @@ export class OutboundRequests {
 
       this.#pending.set(correlation, {
         kind: "set",
-        service,
+        object,
         property,
         timestamp: startedAt,
         resolve: () => {
@@ -109,7 +109,7 @@ export class OutboundRequests {
       this.tracker.enter();
       this.ctx.diagnostic.maybe("request:sent")?.({
         ref: correlation,
-        service,
+        object,
         property,
         kind: "set",
       });
@@ -119,7 +119,7 @@ export class OutboundRequests {
           id: correlation,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.SET,
-          payload: { service, property, value: substitute },
+          payload: { object, property, value: substitute },
         })
         .catch((cause: unknown) => {
           cleanup();
@@ -133,7 +133,7 @@ export class OutboundRequests {
     });
   }
 
-  async get(service: string, property: string): Promise<unknown> {
+  async get(object: string, property: string): Promise<unknown> {
     if (this.ctx.state() !== SessionState.OPEN) {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
@@ -147,7 +147,7 @@ export class OutboundRequests {
 
       this.#pending.set(correlation, {
         kind: "get",
-        service,
+        object,
         property,
         timestamp: startedAt,
         resolve: (value: unknown) => {
@@ -162,7 +162,7 @@ export class OutboundRequests {
       this.tracker.enter();
       this.ctx.diagnostic.maybe("request:sent")?.({
         ref: correlation,
-        service,
+        object,
         property,
         kind: "get",
       });
@@ -172,7 +172,7 @@ export class OutboundRequests {
           id: correlation,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.GET,
-          payload: { service, property },
+          payload: { object, property },
         })
         .catch((cause: unknown) => {
           cleanup();
@@ -191,7 +191,7 @@ export class OutboundRequests {
    * `AbortSignal` -> wire ABORT.
    */
   async request(
-    service: string,
+    object: string,
     method: string,
     args: ReadonlyArray<unknown>,
     control?: Omit<RequestControl, "abortable">,
@@ -212,7 +212,7 @@ export class OutboundRequests {
       });
 
     const payload = {
-      service,
+      object,
       method,
       args: substitutes,
       control: { ...control, abortable: signal instanceof AbortSignal },
@@ -265,7 +265,7 @@ export class OutboundRequests {
 
           this.#pending.set(correlation, {
             kind: "call",
-            service,
+            object,
             property: method,
             timestamp: Date.now(),
             resolve: (value: unknown) => {
@@ -279,7 +279,7 @@ export class OutboundRequests {
 
           this.ctx.diagnostic.maybe("request:sent")?.({
             ref: correlation,
-            service,
+            object,
             property: method,
             kind: "call",
           });
@@ -329,7 +329,7 @@ export class OutboundRequests {
    * When not `open`, returns an iterator whose `next` rejects with `UNAVAILABLE` (sync throw only for bad args).
    */
   stream(
-    service: string,
+    object: string,
     method: string,
     args: ReadonlyArray<unknown>,
     control?: Omit<RequestControl, "abortable">,
@@ -359,7 +359,7 @@ export class OutboundRequests {
 
     const entry: PendingStreamRequest = {
       kind: "stream",
-      service,
+      object,
       property: method,
       timestamp: Date.now(),
       queue,
@@ -405,7 +405,7 @@ export class OutboundRequests {
 
     this.ctx.diagnostic.maybe("request:sent")?.({
       ref: correlation,
-      service,
+      object,
       property: method,
       kind: "stream",
     });
@@ -423,7 +423,7 @@ export class OutboundRequests {
           id: correlation,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
-          payload: { service, method, args: substitutes, control },
+          payload: { object, method, args: substitutes, control },
         });
 
         await this.ctx.send<Packets.StreamResponsePacket>({

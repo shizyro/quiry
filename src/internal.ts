@@ -1,7 +1,7 @@
 import type { Session, Callback } from "./core/session";
 import { attachCallerStack, captureCallerStack, QuiryError } from "./protocol/errors";
 
-import type { ServiceRegistry, ServiceImpl } from "./protocol/types";
+import type { RemoteRegistry, RemoteImpl } from "./protocol/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
 import { WireStatus, type RequestControl } from "./protocol/wire";
 
@@ -9,8 +9,8 @@ import * as QuirySymbol from "./core/symbols";
 
 export type PeerIdentifier = string;
 
-export class PeerConnection<TServices extends ServiceRegistry = {}> {
-  private readonly cached = new Map<keyof TServices, ServiceImpl>();
+export class PeerConnection<TObjects extends RemoteRegistry = {}> {
+  private readonly cached = new Map<keyof TObjects, RemoteImpl>();
   constructor(
     readonly identifier: PeerIdentifier,
     private readonly session: Session,
@@ -20,19 +20,19 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
     return this.session.diagnostic;
   }
 
-  service<TOverride extends ServiceImpl = never, TName extends string = string>(
+  remote<TOverride extends RemoteImpl = never, TName extends string = string>(
     name: TName,
     control?: RequestControl,
   ): Remote<
-    [TOverride] extends [never] ? (TName extends keyof TServices ? TServices[TName] : ServiceImpl) : TOverride
+    [TOverride] extends [never] ? (TName extends keyof TObjects ? TObjects[TName] : RemoteImpl) : TOverride
   > {
     let proxy: Remote<unknown>;
 
-    if (control) proxy = makeServiceProxy(name, this.session, control);
+    if (control) proxy = makeRemoteObjectProxy(name, this.session, control);
     else {
       proxy = this.cached.get(name) as Remote<unknown>;
       if (!proxy) {
-        proxy = makeServiceProxy(name, this.session);
+        proxy = makeRemoteObjectProxy(name, this.session);
         this.cached.set(name, proxy);
       }
     }
@@ -55,37 +55,37 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
   }
 
   /** Resolves to the value of a remote property. */
-  async get<TName extends keyof TServices, TProperty extends RemotablePropertyKeys<TServices[TName]>>(
+  async get<TName extends keyof TObjects, TProperty extends RemotablePropertyKeys<TObjects[TName]>>(
     name: TName,
     property: TProperty,
-  ): Promise<TServices[TName][TProperty]> {
-    return this.session.get(name as string, property as string) as Promise<TServices[TName][TProperty]>;
+  ): Promise<TObjects[TName][TProperty]> {
+    return this.session.get(name as string, property as string) as Promise<TObjects[TName][TProperty]>;
   }
 
   /**
-   * Sends a unary RPC request to the remote service. Supporting both spread and explicit array arguments.
+   * Sends a unary RPC request to the remote object. Supporting both spread and explicit array arguments.
    */
-  call(service: string, method: string, ...args: unknown[]): Promise<unknown>;
-  call(service: string, method: string, args: unknown[], options?: RequestControl): Promise<unknown>;
-  call(service: string, method: string, ...rest: unknown[]): Promise<unknown> {
+  call(name: string, method: string, ...args: unknown[]): Promise<unknown>;
+  call(name: string, method: string, args: unknown[], options?: RequestControl): Promise<unknown>;
+  call(name: string, method: string, ...rest: unknown[]): Promise<unknown> {
     const [args, options] = splitArgsAndOptions(rest);
-    return this.session.request(service, method, args, options);
+    return this.session.request(name, method, args, options);
   }
 
   /**
    * Open a server-streaming call. The returned iterator yields chunks as
-   * they arrive from the remote service.
+   * they arrive from the remote object.
    */
-  stream(service: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown>;
+  stream(name: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown>;
   stream(
-    service: string,
+    name: string,
     method: string,
     args: unknown[],
     options?: RequestControl,
   ): AsyncIterableIterator<unknown>;
-  stream(service: string, method: string, ...rest: unknown[]): AsyncIterableIterator<unknown> {
+  stream(name: string, method: string, ...rest: unknown[]): AsyncIterableIterator<unknown> {
     const [args, options] = splitArgsAndOptions(rest);
-    return this.session.stream(service, method, args, options);
+    return this.session.stream(name, method, args, options);
   }
 
   async close(reason?: string, graceful: boolean = true): Promise<void> {
@@ -94,8 +94,8 @@ export class PeerConnection<TServices extends ServiceRegistry = {}> {
   }
 }
 
-function makeServiceProxy(service: string, session: Session, control?: RequestControl): object {
-  const callerStack = captureCallerStack(makeServiceProxy);
+function makeRemoteObjectProxy(object: string, session: Session, control?: RequestControl): object {
+  const callerStack = captureCallerStack(makeRemoteObjectProxy);
 
   return new Proxy(Object.create(null), {
     get(_, key: string) {
@@ -103,7 +103,7 @@ function makeServiceProxy(service: string, session: Session, control?: RequestCo
       // i.e. when the developer writes `await proxy.name` without calling it
       let getter: Promise<unknown> | null = null;
       const opt = (): Promise<unknown> => {
-        return (getter ??= session.get(service, key).catch((error: unknown) => {
+        return (getter ??= session.get(object, key).catch((error: unknown) => {
           attachCallerStack(error, callerStack);
           return Promise.reject(error);
         }));
@@ -111,7 +111,7 @@ function makeServiceProxy(service: string, session: Session, control?: RequestCo
 
       return new Proxy(function () {} as unknown as object, {
         apply(_, __, args: unknown[]) {
-          return makeCallOrStream(service, key, args, session, control, callerStack);
+          return makeCallOrStream(object, key, args, session, control, callerStack);
         },
         get(_, prop) {
           switch (prop) {
@@ -142,7 +142,7 @@ function makeServiceProxy(service: string, session: Session, control?: RequestCo
     set(_, key: string, value: unknown): boolean {
       (async () => {
         // Trigger async side effects without awaiting
-        await session.set(service, key, await value);
+        await session.set(object, key, await value);
       })();
       return true;
     },
@@ -150,7 +150,7 @@ function makeServiceProxy(service: string, session: Session, control?: RequestCo
 }
 
 /**
- * A lazy handle returned by the service proxy that commits to either a
+ * A lazy handle returned by the remote proxy that commits to either a
  * unary request or a server-stream on first use.
  *
  * The two paths are mutually exclusive: whichever protocol the caller engages
@@ -167,7 +167,7 @@ enum QueryMode {
 }
 
 function makeCallOrStream<T = unknown>(
-  service: string,
+  object: string,
   method: string,
   args: unknown[],
   session: Session,
@@ -185,24 +185,24 @@ function makeCallOrStream<T = unknown>(
 
   const run = (): Promise<unknown> => {
     if (mode === QueryMode.STREAM)
-      throw new Error(`Cannot await ${service}.${method}(...) — it has already been committed as a stream.`);
+      throw new Error(`Cannot await ${object}.${method}(...) — it has already been committed as a stream.`);
 
     mode = QueryMode.CALL;
     return (call ??= session
-      .request(service, method, args, control)
+      .request(object, method, args, control)
       .catch((error: unknown) => Promise.reject(tag(error))));
   };
 
   const flow = (): AsyncIterableIterator<unknown> => {
     if (mode === QueryMode.CALL)
       throw new Error(
-        `Cannot iterate ${service}.${method}(...) — it has already been committed as a unary call.`,
+        `Cannot iterate ${object}.${method}(...) — it has already been committed as a unary call.`,
       );
 
     mode = QueryMode.STREAM;
     if (iter) return iter;
 
-    const source = session.stream(service, method, args, control);
+    const source = session.stream(object, method, args, control);
     iter = {
       [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
         return this;

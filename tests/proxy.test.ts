@@ -44,13 +44,13 @@ describe("Peer service proxy", () => {
   });
 
   it("awaiting a property reads through GET", async () => {
-    const svc = setup({ version: "1.2.3" }).service<{ version: string }>("svc");
+    const svc = setup({ version: "1.2.3" }).remote<{ version: string }>("svc");
     await expect(svc.version).resolves.toBe("1.2.3");
   });
 
   it("assigning to a property triggers an async SET on the peer", async () => {
     const writes: Array<[string, unknown]> = [];
-    const svc = setup({ counter: 0 }, (prop, v) => writes.push([prop, v])).service<{ counter: number }>(
+    const svc = setup({ counter: 0 }, (prop, v) => writes.push([prop, v])).remote<{ counter: number }>(
       "svc",
     );
 
@@ -62,7 +62,7 @@ describe("Peer service proxy", () => {
   it("calling a method as a function returns its result via the call path", async () => {
     const svc = setup({
       greet: (name: string) => `hello, ${name}`,
-    }).service<{ greet: (n: string) => Promise<string> }>("svc");
+    }).remote<{ greet: (n: string) => Promise<string> }>("svc");
 
     await expect(svc.greet("world")).resolves.toBe("hello, world");
   });
@@ -72,7 +72,7 @@ describe("Peer service proxy", () => {
       range: function* (start: number, end: number) {
         for (let i = start; i < end; i++) yield i;
       },
-    }).service<{ range: (s: number, e: number) => Generator<number> }>("svc");
+    }).remote<{ range: (s: number, e: number) => Generator<number> }>("svc");
 
     const out: number[] = [];
     for await (const n of svc.range(0, 4)) out.push(n);
@@ -80,7 +80,7 @@ describe("Peer service proxy", () => {
   });
 
   it("a handle that already committed to call cannot also be iterated", async () => {
-    const svc = setup({ now: () => Date.now() }).service<{ now: () => Promise<number> }>("svc");
+    const svc = setup({ now: () => Date.now() }).remote<{ now: () => Promise<number> }>("svc");
 
     const handle = svc.now();
     await handle; // commit to call mode
@@ -94,7 +94,7 @@ describe("Peer service proxy", () => {
       seq: function* () {
         yield 1;
       },
-    }).service<{ seq: () => Generator<number> }>("svc");
+    }).remote<{ seq: () => Generator<number> }>("svc");
 
     const handle = svc.seq();
     const it = handle[Symbol.asyncIterator]();

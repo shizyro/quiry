@@ -8,6 +8,6 @@ export type CorrelationId = Brand<string, "CorrelationId">;
 export type CallbackId = Brand<string, "CallbackId">;
 export type InvocationId = Brand<string, "InvocationId">;
 
-export type ServiceImpl = object;
-/** A registry of named services. */
-export type ServiceRegistry = Record<string, ServiceImpl>;
+export type RemoteImpl = object;
+/** A registry of named remote objects. */
+export type RemoteRegistry = Record<string, RemoteImpl>;

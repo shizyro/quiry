@@ -1,10 +1,10 @@
 /**
- * Service transformers take a real service class and produces an
+ * Remote object transformers take a real object class and produces an
  * equivalent remote proxy surface.
  */
 // biome-ignore-all format: ignore.
 
-// Helper types for service transformation
+// Helper types
 
 type AnyFn = (...args: any[]) => any;
 type Promisify<T> = [T] extends [Promise<unknown>] ? T : Promise<T>;
@@ -19,7 +19,7 @@ type DeepAsync<T> = [T] extends [(...args: infer TArguments) => infer TReturn]
 
 // Filter for callable members
 
-export type RemotableMethodKeys<T> = { 
+export type RemotableMethodKeys<T> = {
   [K in keyof T]: T[K] extends AnyFn ? K : never
 }[keyof T];
 export type RemotablePropertyKeys<T> = {

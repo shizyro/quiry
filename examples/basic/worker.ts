@@ -7,9 +7,9 @@ function log(...data: any[]) {
 
 async function main() {
   const peer = Quiry.attach<ExampleRegistry>(new Quiry.WorkerThreadsTransport());
-  void peer.service("greeter").greet("World");
+  void peer.remote("greeter").greet("World");
 
-  const math = peer.service("math");
+  const math = peer.remote("math");
   const result = await math.multiply(3, 4); // unary calls
   log(`3 x 4 = ${result}`);
   // object property access
@@ -17,18 +17,18 @@ async function main() {
 
   const received = [];
   // async iterator streaming
-  for await (const number of peer.service("math").prime()) {
+  for await (const number of peer.remote("math").prime()) {
     received.push(number);
     if (number > 100) break;
   }
   log(`Stream results: [${received.slice(0, 3).join(", ")}, ..., ${received.slice(-3).join(", ")}]`);
 
   // support for functional arguments
-  void peer.service("timer").delay(() => {
+  void peer.remote("timer").delay(() => {
     log("Hello, from the other side! One second later!");
   }, 1000); // inline callbacks are released when the remote call settles
 
-  const events = peer.service("events");
+  const events = peer.remote("events");
   log(`Event names: ${await events.eventNames}`); // remote getters
 
   // assigned long-lived callback - must be manually released with `.release()`,
@@ -41,14 +41,14 @@ async function main() {
   // once they are garbage collected on this side (caller).
   const unsubscribe = await events.on("foo", handle);
 
-  const predicate = await peer.service("math").threshold(50);
+  const predicate = await peer.remote("math").threshold(50);
   const scores = [15, 42, 68, 91, 33];
   const results = await Promise.all(scores.map(predicate));
   const filtered = scores.filter((_, index) => results[index]);
   log(scores, "->", filtered);
 
   // ... also supports functions that are deeply nested in return values
-  const file = await peer.service("file", { timeout: 1000 }).open("data.txt"); // controlled services
+  const file = await peer.remote("file", { timeout: 1000 }).open("data.txt"); // controlled remote objects
   log("\n\t", await file.read(123));
   await file.close();
 

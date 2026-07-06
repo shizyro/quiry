@@ -43,7 +43,7 @@ export interface SessionEvents {
   "session:state": { readonly prev: SessionStateLiteral; readonly next: SessionStateLiteral };
   "session:terminate": { readonly reason?: string };
   "request:sent": WithRef<{
-    readonly service: string;
+    readonly object: string;
     readonly property: string;
     readonly kind: RequestKind;
   }>;
@@ -57,7 +57,7 @@ export interface SessionEvents {
   }>;
   "request:abort": WithRef;
   "inquiry:received": WithRef<{
-    readonly service: string;
+    readonly object: string;
     readonly property: string;
     readonly kind: InboundKind;
   }>;

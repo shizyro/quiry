@@ -19,7 +19,7 @@ If it looks like a function, you call it. If it looks like a value, you read it.
 
 ```typescript
 // main.ts
-import * as Quriy from "quiry";
+import * as Quiry from "quiry";
 import { fork } from "node:child_process";
 
 // create a child process, and wrap to register
@@ -38,10 +38,10 @@ class MathService {
   }
 }
 
-// expose a service with a unique identifier
+// expose an object with a unique identifier
 Quiry.expose("math", new MathService());
 
-export type ServiceRegistry = {
+export type RemoteRegistry = {
   math: MathService;
 }
 ```
@@ -49,15 +49,15 @@ export type ServiceRegistry = {
 ```typescript
 // child.ts
 import * as Quiry from "quiry";
-import type { ServiceRegistry } from "./main";
+import type { RemoteRegistry } from "./main";
 
 // create an inter-process transport. in this case, it hooks to parent by default
 const transport = new Quiry.ChildProcessTransport();
-// attach to local registry, and keep a peer reference to later query exposed services
-const peer = Quiry.attach<ServiceRegistry>(transport);
+// attach to local registry, and keep a peer reference to later query exposed objects
+const peer = Quiry.attach<RemoteRegistry>(transport);
 
-// now, you can access services from that transport
-const math = peer.service("math"); // Remote<MathService>
+// now, you can access remote objects from that transport
+const math = peer.remote("math"); // Remote<MathService>
 
 console.log(await math.version); // 1.0.0
 console.log(await math.add(1, 2)); // 3
@@ -66,12 +66,12 @@ for await (const n of math.count(1, 3)) {
 }
 ```
 
-The proxy returned by `peer.service(...)` has the exact shape of the original interface, wrapped in an async transformer. You export and pass the service registry into the peer generic, or directly into the service callsite to override the inferred type.
+The proxy returned by `peer.remote(...)` has the exact shape of the original interface, wrapped in an async transformer. You export and pass the remote registry into the peer generic, or directly into the proxy callsite to override the inferred type.
 
 ```typescript
 const peer = Quiry.attach<Registry>(...);
-peer.service("foo"); // inferred from Registry
-peer.service<FooService>("foo"); // Remote<FooService> [type override]
+peer.remote("foo"); // inferred from Registry
+peer.remote<FooService>("foo"); // Remote<FooService> [type override]
 ```
 
 Note there is `Quiry.fork()` and `Quiry.spawn()`, which are convenience methods that handle transport construction. If you need more control over the worker instance, you can construct it yourself and attach manually:
@@ -86,20 +86,20 @@ For a more detailed showcase, make sure to check this [basic example](https://gi
 
 ## Streaming
 
-Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks as it becomes available rather than waiting for the full result, this is done through [Generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator). Normally, streaming across a process boundary means building an event protocol, manually chunking messages, or batching results. Quiry lets services expose generators instead.
+Returning a single value is not always enough, and not every operation is a request/response. Streaming is returning data in chunks as it becomes available rather than waiting for the full result, this is done through [Generators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator). Normally, streaming across a process boundary means building an event protocol, manually chunking messages, or batching results. Quiry lets you expose generators as they are instead.
 
 Streams should be pulled, not pushed. The problem is that there's no reliable way to know at runtime whether a remote method is a generator or a regular function. A separate opt-in API would feel off as well.
 
 For that, the same proxy method is **both awaitable and async-iterable**. Whichever protocol engages depends on how you consume it first. The inferred type system narrows accordingly.
 
 ```typescript
-// service can return any iterator or generator, sync or async
+// remote objects can return any iterator or generator, sync or async
 function* range(start: number, end: number) { ... }
 ```
 
 ```typescript
 // the caller can opt for an async iterable
-for await (const value of service.range(0, 10)) { ... }
+for await (const value of proxy.range(0, 10)) { ... }
 ```
 
 If the callsite feels natural, it should do what's expected.
@@ -114,7 +114,7 @@ Functions don't survive structured cloning, but we can't pretend they don't exis
 If your method accepts a callback, the caller should be able to pass one.
 
 ```typescript
-await peer.service<TimerService>("timer")
+await peer.remote<TimerService>("timer")
   .every(1000, (tick) => console.log("tick", tick));
 ```
 
@@ -126,17 +126,17 @@ Callback proxies are session-scoped, outliving a single provocation. They are re
 
 ```typescript
 // released when the call returns
-await peer.service<JobsService>("jobs").run(jobId, (progress) => { ... });
+await peer.remote<JobsService>("jobs").run(jobId, (progress) => { ... });
 
 // released when you say so
 const handle = peer.callback((event) => { ... });
-await peer.service<StreamService>("stream").subscribe("updates", handle);
+await peer.remote<StreamService>("stream").subscribe("updates", handle);
 // ... later
 handle[Quiry.release]();
 
 // or let the runtime handle it
 using handle = peer.callback((event) => { ... });
-await peer.service<StreamService>("stream").subscribe("updates", handle);
+await peer.remote<StreamService>("stream").subscribe("updates", handle);
 // [the callback is automatically released when the scope exits]
 ```
 
@@ -144,7 +144,7 @@ Callbacks are always asynchronous from the remote caller’s perspective because
 
 ### Returned Function Stubs
 
-Quiry transparently handles functions that appear in **return values** from remote service methods — not just in arguments passed to them. When a service method returns a function (or a plain object containing functions), those functions are automatically translated into callback proxies that work identically to locally-defined functions.
+Quiry transparently handles functions that appear in **return values** from remote object methods — not just in arguments passed to them. When a method returns a function (or a plain object containing functions), those functions are automatically translated into callback proxies that work identically to locally-defined functions.
 
 ```typescript
 // example of a higher order function
@@ -155,7 +155,7 @@ listen(event: string, listener: (...args: unknown[]) => void): Unsubscribe {
 ```
 
 ```typescript
-const off = await service.listen("foo", () => { ... }); // Remote<Unsubscribe>
+const off = await proxy.listen("foo", () => { ... }); // Remote<Unsubscribe>
 // ... later
 await off();
 // [the callback is automatically released from peer side when it's no longer used]

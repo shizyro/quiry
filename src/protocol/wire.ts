@@ -21,7 +21,7 @@ export enum WireStatus {
   INVALID_ARGUMENT,
   /** Deadline expired before the call could be completed. */
   DEADLINE_EXCEEDED,
-  /** The requested service or property does not exist. */
+  /** The requested object or property does not exist. */
   NOT_FOUND,
   /** Data lost during transmission. */
   DATA_LOSS,
@@ -41,7 +41,7 @@ export enum WireStatus {
   PEER_GONE,
   /** Peer is draining and will not accept new work. */
   DRAINING,
-  /** Concurrency limit exceeded on this service or globally. */
+  /** Concurrency limit exceeded on this thread or globally. */
   OVERLOADED,
 }
 
