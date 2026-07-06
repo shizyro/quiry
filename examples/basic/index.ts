@@ -1,4 +1,4 @@
-import * as Quiry from "~/";
+import * as Quiry from "~/index";
 
 import { isMainThread } from "node:worker_threads";
 import { openSync, readSync, closeSync } from "node:fs";

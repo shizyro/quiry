@@ -33,11 +33,12 @@ interface PendingCallbackInvocation<T = unknown> {
   readonly ref: CorrelationId | null; // null for session-scoped returned stubs
   resolve: (value: T) => void;
   reject: (error: Error) => void;
-  timer?: ReturnType<typeof setTimeout>;
   timestamp: number;
 }
 
 type BridgeContext = Omit<SessionContext, "callbacks">;
+
+const INFLIGHT_DRAIN_TIMEOUT: number = 5000;
 
 /**
  * Composes a {@link CallbackRegistry} for the in-process table and adds the
@@ -68,7 +69,6 @@ export class CallbackBridge {
 
   constructor(
     private readonly ctx: BridgeContext,
-    private readonly config: { defaultTimeout: number },
   ) {
     this.localFinalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
       if (this.ctx.state() === SessionState.CLOSED) return;
@@ -272,7 +272,6 @@ export class CallbackBridge {
     const invocation = this.#pending_invocations.get(eid);
     if (!invocation) return; // stale return — local already timed out
 
-    clearTimeout(invocation.timer);
     this.#pending_invocations.delete(eid);
     this.outbound.exit();
     if (invocation.ref) this.invocations.exit(invocation.ref);
@@ -357,7 +356,6 @@ export class CallbackBridge {
    */
   drain(error: Error): void {
     for (const invocation of this.#pending_invocations.values()) {
-      if (invocation.timer) clearTimeout(invocation.timer);
       invocation.reject(error);
     }
     this.#pending_invocations.clear();
@@ -399,48 +397,20 @@ export class CallbackBridge {
   ): RemoteCallback<(...args: unknown[]) => Promise<unknown>> {
     const handle = (...args: unknown[]): Promise<unknown> => {
       const eid = `${id}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
-
-      const timeout = scope === CallbackScope.SESSION ? null : this.config.defaultTimeout;
       const promise = new Promise<unknown>((resolve, reject) => {
-        const startedAt = Date.now();
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        if (timeout !== null) {
-          // Bound the pending yield with a deadline — a misbehaving peer
-          // must not be able to leak promises indefinitely.
-          timer = setTimeout(() => {
-            this.#pending_invocations.delete(eid);
-            this.outbound.exit();
-            if (ref) this.invocations.exit(ref);
-            reject(
-              new QuiryError(
-                WireStatus.DEADLINE_EXCEEDED,
-                `Remote callback did not return within ${timeout}ms`,
-                {
-                  correlationId: ref ?? undefined,
-                  detail: { callback: id, eid, timeout },
-                },
-              ),
-            );
-          }, timeout);
-        }
-
         this.#pending_invocations.set(eid, {
           ref,
-          timestamp: startedAt,
+          timestamp: Date.now(),
           resolve: (value: unknown) => {
-            if (timer) clearTimeout(timer);
             resolve(value);
           },
           reject: (error: Error) => {
-            if (timer) clearTimeout(timer);
             reject(error);
           },
-          timer,
         } satisfies PendingCallbackInvocation);
 
         this.outbound.enter();
         if (ref) this.invocations.enter(ref);
-
         this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, id, ref });
 
         void this.ctx
@@ -453,7 +423,6 @@ export class CallbackBridge {
             const pending = this.#pending_invocations.get(eid);
             if (!pending) return;
 
-            if (pending.timer) clearTimeout(pending.timer);
             this.#pending_invocations.delete(eid);
             this.outbound.exit();
             if (ref) this.invocations.exit(ref);
@@ -507,7 +476,7 @@ export class CallbackBridge {
     await Promise.race([
       this.invocations.idle(ref),
       new Promise<void>((resolve) => {
-        timer = setTimeout(() => resolve(), this.config.defaultTimeout);
+        timer = setTimeout(() => resolve(), INFLIGHT_DRAIN_TIMEOUT);
       }),
     ]);
 

@@ -98,7 +98,7 @@ export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
 export function attach<TObjects extends RemoteRegistry = {}>(
   transport: Transport<AnyPacket>,
 ): PeerConnection<TObjects> {
-  const session = new Session(transport, handleInquiry, {}).open();
+  const session = new Session(transport, handleInquiry).open();
   const identifier = randomBytes(4).toString("hex");
   const connection = new PeerConnection(identifier, session);
   peers.set(identifier, connection);
@@ -256,5 +256,4 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
-export type { RetryPolicy, RequestControl } from "./protocol/wire";
 export * from "./core/symbols";

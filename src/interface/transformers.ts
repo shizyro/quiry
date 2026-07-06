@@ -2,7 +2,8 @@
  * Remote object transformers take a real object class and produces an
  * equivalent remote proxy surface.
  */
-// biome-ignore-all format: ignore.
+
+import type * as QuirySymbol from "../core/symbols";
 
 // Helper types
 
@@ -28,14 +29,20 @@ export type RemotablePropertyKeys<T> = {
 
 // Per-method remote transformation
 
+type RemoteReturn<T extends AnyFn> =
+  ReturnType<T> extends string
+    ? Promise<DeepAsync<Awaited<ReturnType<T>>>>
+    : ReturnType<T> extends Iterable<any> | AsyncIterable<any>
+      ? AsyncIterableIterator<UnwrapIterable<ReturnType<T>>>
+      : Promise<DeepAsync<Awaited<ReturnType<T>>>>;
+
+type RemoteFunction<T extends AnyFn> = ((...args: Parameters<T>) => RemoteReturn<T>) & {
+  [QuirySymbol.control]: (signal: AbortSignal) => (...args: Parameters<T>) => RemoteReturn<T>
+};
+
 type RemoteProperty<T> =
   T extends AnyFn
-    ? (...args: Parameters<T>) =>
-        ReturnType<T> extends string
-          ? Promise<DeepAsync<Awaited<ReturnType<T>>>>
-          : ReturnType<T> extends Iterable<any> | AsyncIterable<any>
-            ? AsyncIterableIterator<UnwrapIterable<ReturnType<T>>>
-            : Promise<DeepAsync<Awaited<ReturnType<T>>>>
+    ? RemoteFunction<T>
     : T extends abstract new (...args: infer Args) => infer Instance
       ? { new (...args: Args): Promise<Remote<Instance>> }
       : T extends Serializable

@@ -51,10 +51,6 @@ export interface SessionEvents {
     readonly status: WireStatus;
     readonly durationMs: number;
   }>;
-  "request:retry": WithRef<{
-    readonly attempt: number;
-    readonly delayMs: number;
-  }>;
   "request:abort": WithRef;
   "inquiry:received": WithRef<{
     readonly object: string;
@@ -122,7 +118,6 @@ export const SESSION_EVENT_NAMES = [
   "session:terminate",
   "request:sent",
   "request:settled",
-  "request:retry",
   "request:abort",
   "inquiry:received",
   "inquiry:settled",

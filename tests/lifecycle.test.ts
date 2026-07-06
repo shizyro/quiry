@@ -56,7 +56,7 @@ describe("Session lifecycle", () => {
       producerInquiry: () => ({ value: () => new Promise<never>(() => {}) }),
     });
 
-    const promise = pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 0 } });
+    const promise = pair.consumer.request("svc", "_", []);
     await new Promise((r) => setTimeout(r, 15));
 
     // No DRAIN goes out under force-close. We can't easily assert the

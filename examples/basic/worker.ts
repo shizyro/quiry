@@ -1,4 +1,4 @@
-import * as Quiry from "~/";
+import * as Quiry from "~/index";
 import type { ExampleRegistry } from "./index";
 
 function log(...data: any[]) {
@@ -48,7 +48,8 @@ async function main() {
   log(scores, "->", filtered);
 
   // ... also supports functions that are deeply nested in return values
-  const file = await peer.remote("file", { timeout: 1000 }).open("data.txt"); // controlled remote objects
+  const file = await peer.remote("file")
+    .open[Quiry.control](AbortSignal.timeout(5000))("data.txt"); // controlled remote calls
   log("\n\t", await file.read(123));
   await file.close();
 

@@ -11,22 +11,6 @@ import type { CorrelationId, TraceId } from "./types";
 import { isSerializable } from "../lib/helpers";
 
 export type NonOkWireStatus = Exclude<WireStatus, typeof WireStatus.OK>;
-export type RetryableWireStatus =
-  | WireStatus.UNAVAILABLE
-  | WireStatus.RESOURCE_EXHAUSTED
-  | WireStatus.OVERLOADED
-  | WireStatus.PEER_GONE;
-
-const RETRYABLE_CODES = new Set<WireStatus>([
-  WireStatus.UNAVAILABLE,
-  WireStatus.RESOURCE_EXHAUSTED,
-  WireStatus.OVERLOADED,
-  WireStatus.PEER_GONE,
-]);
-
-export function isRetryableStatus(code: WireStatus): code is RetryableWireStatus {
-  return RETRYABLE_CODES.has(code);
-}
 
 export interface TraceableErrorOptions {
   /** Structured, safe context. Non-serializable values are stripped at the wire boundary. */
@@ -50,7 +34,6 @@ export const MAX_CAUSE_DEPTH = 3;
  */
 export class QuiryError extends Error {
   readonly code: WireStatus;
-  readonly retryable: boolean;
 
   readonly correlationId?: CorrelationId;
   readonly traceId?: TraceId;
@@ -63,7 +46,6 @@ export class QuiryError extends Error {
 
     this.name = "QuiryError";
     this.code = code;
-    this.retryable = isRetryableStatus(code);
     this.correlationId = opts.correlationId;
     this.traceId = opts.traceId;
     this.detail = opts.detail;
@@ -128,7 +110,6 @@ export class QuiryError extends Error {
     const meta: string[] = [`code=${WireStatus[this.code] ?? this.code}`];
     if (this.correlationId) meta.push(`ref=${this.correlationId}`);
     if (this.traceId) meta.push(`trace=${this.traceId}`);
-    if (this.retryable) meta.push("retryable");
 
     const header = `\u001b[91m${this.name}: ${this.message} [${meta.join(", ")}]\u001b[39m`;
     const stack = this.stack?.split("\n").slice(1).join("\n") ?? "";

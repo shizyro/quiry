@@ -3,7 +3,7 @@ import { attachCallerStack, captureCallerStack, QuiryError } from "./protocol/er
 
 import type { RemoteRegistry, RemoteImpl } from "./protocol/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
-import { WireStatus, type RequestControl } from "./protocol/wire";
+import { WireStatus } from "./protocol/wire";
 
 import * as QuirySymbol from "./core/symbols";
 
@@ -20,23 +20,14 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
     return this.session.diagnostic;
   }
 
-  remote<TOverride extends RemoteImpl = never, TName extends string = string>(
-    name: TName,
-    control?: RequestControl,
-  ): Remote<
+  remote<TOverride extends RemoteImpl = never, TName extends string = string>(name: TName): Remote<
     [TOverride] extends [never] ? (TName extends keyof TObjects ? TObjects[TName] : RemoteImpl) : TOverride
   > {
-    let proxy: Remote<unknown>;
-
-    if (control) proxy = makeRemoteObjectProxy(name, this.session, control);
-    else {
-      proxy = this.cached.get(name) as Remote<unknown>;
-      if (!proxy) {
-        proxy = makeRemoteObjectProxy(name, this.session);
-        this.cached.set(name, proxy);
-      }
+    let proxy = this.cached.get(name) as Remote<unknown>;
+    if (!proxy) {
+      proxy = makeRemoteObjectProxy(name, this.session);
+      this.cached.set(name, proxy);
     }
-
     // @ts-expect-error; ignore.
     return proxy;
   }
@@ -65,27 +56,16 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
   /**
    * Sends a unary RPC request to the remote object. Supporting both spread and explicit array arguments.
    */
-  call(name: string, method: string, ...args: unknown[]): Promise<unknown>;
-  call(name: string, method: string, args: unknown[], options?: RequestControl): Promise<unknown>;
-  call(name: string, method: string, ...rest: unknown[]): Promise<unknown> {
-    const [args, options] = splitArgsAndOptions(rest);
-    return this.session.request(name, method, args, options);
+  call(name: string, method: string, ...args: unknown[]): Promise<unknown> {
+    return this.session.request(name, method, args);
   }
 
   /**
    * Open a server-streaming call. The returned iterator yields chunks as
    * they arrive from the remote object.
    */
-  stream(name: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown>;
-  stream(
-    name: string,
-    method: string,
-    args: unknown[],
-    options?: RequestControl,
-  ): AsyncIterableIterator<unknown>;
-  stream(name: string, method: string, ...rest: unknown[]): AsyncIterableIterator<unknown> {
-    const [args, options] = splitArgsAndOptions(rest);
-    return this.session.stream(name, method, args, options);
+  stream(name: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown> {
+    return this.session.stream(name, method, args);
   }
 
   async close(reason?: string, graceful: boolean = true): Promise<void> {
@@ -94,7 +74,7 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
   }
 }
 
-function makeRemoteObjectProxy(object: string, session: Session, control?: RequestControl): object {
+function makeRemoteObjectProxy(object: string, session: Session): object {
   const callerStack = captureCallerStack(makeRemoteObjectProxy);
 
   return new Proxy(Object.create(null), {
@@ -111,7 +91,7 @@ function makeRemoteObjectProxy(object: string, session: Session, control?: Reque
 
       return new Proxy(function () {} as unknown as object, {
         apply(_, __, args: unknown[]) {
-          return makeCallOrStream(object, key, args, session, control, callerStack);
+          return makeCallOrStream(object, key, args, session, callerStack);
         },
         get(_, prop) {
           switch (prop) {
@@ -129,6 +109,11 @@ function makeRemoteObjectProxy(object: string, session: Session, control?: Reque
             case "finally":
               return (onfinally?: (() => void) | undefined | null): Promise<unknown> =>
                 opt().finally(onfinally);
+
+            case QuirySymbol.control:
+              return (signal: AbortSignal) => {
+                return (...args: unknown[]) => makeCallOrStream(object, key, args, session, callerStack, signal)
+              }
 
             default:
               throw new QuiryError(
@@ -171,8 +156,8 @@ function makeCallOrStream<T = unknown>(
   method: string,
   args: unknown[],
   session: Session,
-  control?: RequestControl,
   stack?: string,
+  signal?: AbortSignal,
 ): CallOrStream<T> {
   let mode: QueryMode = QueryMode.PENDING;
   let call: Promise<unknown>;
@@ -189,7 +174,7 @@ function makeCallOrStream<T = unknown>(
 
     mode = QueryMode.CALL;
     return (call ??= session
-      .request(object, method, args, control)
+      .request(object, method, args, { signal })
       .catch((error: unknown) => Promise.reject(tag(error))));
   };
 
@@ -202,7 +187,7 @@ function makeCallOrStream<T = unknown>(
     mode = QueryMode.STREAM;
     if (iter) return iter;
 
-    const source = session.stream(object, method, args, control);
+    const source = session.stream(object, method, args, { signal });
     iter = {
       [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
         return this;
@@ -252,31 +237,4 @@ function makeCallOrStream<T = unknown>(
     throw: (err?: unknown): Promise<IteratorResult<unknown>> =>
       mode === QueryMode.STREAM && iter?.throw ? iter.throw(err) : Promise.reject(err),
   } as CallOrStream<T>;
-}
-
-const REQUEST_CONTROL_KEYS = new Set(["timeout", "retry", "abortable", "traceId"]);
-
-/**
- * Peels off a trailing {@link RequestControl} object from the variadic `rest` array.
- *
- * To minimize the chance of a regular argument being mistaken for control options,
- * we only treat the last element as control if it's a plain object whose keys are
- * a non-empty subset of {@link REQUEST_CONTROL_KEYS}. An empty object or any
- * unknown key disqualifies it.
- */
-function splitArgsAndOptions(rest: unknown[]): [unknown[], RequestControl | undefined] {
-  if (rest.length === 0) return [rest, undefined];
-
-  const tail = rest[rest.length - 1];
-  if (!tail || typeof tail !== "object" || Array.isArray(tail)) return [rest, undefined];
-
-  const proto = Object.getPrototypeOf(tail);
-  if (proto !== Object.prototype && proto !== null) return [rest, undefined];
-
-  const keys = Object.keys(tail);
-  if (keys.length === 0 || !keys.every((k) => REQUEST_CONTROL_KEYS.has(k))) {
-    return [rest, undefined];
-  }
-
-  return [rest.slice(0, -1), tail as RequestControl];
 }

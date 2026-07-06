@@ -1,13 +1,12 @@
 import * as Packets from "../../../protocol/packets";
-import { WireKind, WireStatus, type RetryPolicy, type RequestControl } from "../../../protocol/wire";
-import type { CorrelationId } from "../../../protocol/types";
+import { WireKind, WireStatus } from "../../../protocol/wire";
+import type { CorrelationId, TraceId } from "../../../protocol/types";
 
 import { AsyncQueue } from "../../../lib/queue";
 import { InFlightTracker } from "../../../lib/tracker";
 
-import { fromWireError, isRetryableStatus, QuiryError } from "../../../protocol/errors";
+import { fromWireError, QuiryError } from "../../../protocol/errors";
 import { isSerializable, unwrapSerialized } from "../../../lib/helpers";
-import { retryable } from "../../../lib/utils";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
@@ -35,23 +34,20 @@ interface PendingCallRequest<T = unknown> extends RequestDiagnosticContext {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
   timestamp: number;
-  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface PendingStreamRequest extends RequestDiagnosticContext {
   readonly kind: "stream";
   readonly queue: AsyncQueue<unknown>;
   readonly credit: { remaining: number };
-  timer?: ReturnType<typeof setTimeout>;
   seq: number;
 }
 
 type PendingRequest = PendingGetRequest | PendingSetRequest | PendingCallRequest | PendingStreamRequest;
 
-export interface OutboundRequestsConfig {
-  readonly defaultTimeout: number;
-  readonly defaultRetry: Required<RetryPolicy>;
-  readonly creditWindow: number;
+interface OutboundRequestControl {
+  signal?: AbortSignal;
+  traceId?: TraceId;
 }
 
 /**
@@ -71,7 +67,7 @@ export class OutboundRequests {
 
   constructor(
     private readonly ctx: SessionContext,
-    private readonly config: OutboundRequestsConfig,
+    private readonly window: number
   ) {}
 
   // --------- PUBLIC: REQUESTS --------- //
@@ -187,15 +183,13 @@ export class OutboundRequests {
   }
 
   /**
-   * Unary RPC with optional retries ({@link isRetryableStatus}), timeout, and
-   * `AbortSignal` -> wire ABORT.
+   * Unary IPC request over the wire. Can be aborted via `AbortSignal`.
    */
   async request(
     object: string,
     method: string,
     args: ReadonlyArray<unknown>,
-    control?: Omit<RequestControl, "abortable">,
-    signal?: AbortSignal,
+    control?: OutboundRequestControl,
   ): Promise<unknown> {
     if (this.ctx.state() !== SessionState.OPEN) {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open", {
@@ -215,113 +209,80 @@ export class OutboundRequests {
       object,
       method,
       args: substitutes,
-      control: { ...control, abortable: signal instanceof AbortSignal },
     } satisfies Packets.CallRequestPacket["payload"];
-
-    const timeout = control?.timeout ?? this.config.defaultTimeout;
     const context = { correlationId: correlation, traceId: control?.traceId };
 
-    const retryEmit = this.ctx.diagnostic.maybe("request:retry");
-    let attempt = 0;
+    return new Promise<unknown>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let abortHandler: (() => void) | null = null;
 
-    return retryable(
-      async () => {
-        if (attempt > 0) retryEmit?.({ ref: correlation, attempt, delayMs: 0 });
-        attempt++;
+      // Idempotent per-attempt cleanup.
+      const release = (): void => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (abortHandler && control?.signal) {
+          control?.signal.removeEventListener("abort", abortHandler);
+          abortHandler = null;
+        }
+        if (this.#pending.delete(correlation)) this.tracker.exit();
+      };
 
-        return new Promise<unknown>((resolve, reject) => {
-          let timer: ReturnType<typeof setTimeout> | null = null;
-          let abortHandler: (() => void) | null = null;
+      const fail = (error: Error): void => {
+        release();
+        reject(error);
+      };
 
-          // Idempotent per-attempt cleanup.
-          const release = (): void => {
-            if (timer) {
-              clearTimeout(timer);
-              timer = null;
-            }
-            if (abortHandler && signal) {
-              signal.removeEventListener("abort", abortHandler);
-              abortHandler = null;
-            }
-            if (this.#pending.delete(correlation)) this.tracker.exit();
-          };
+      this.#pending.set(correlation, {
+        kind: "call",
+        object,
+        property: method,
+        timestamp: Date.now(),
+        resolve: (value: unknown) => {
+          release();
+          resolve(value);
+        },
+        reject: fail,
+      } satisfies PendingCallRequest);
+      this.tracker.enter();
 
-          const fail = (error: Error): void => {
-            release();
-            reject(error);
-          };
+      this.ctx.diagnostic.maybe("request:sent")?.({
+        ref: correlation,
+        object,
+        property: method,
+        kind: "call",
+      });
 
-          timer = setTimeout(
-            () =>
-              fail(
-                new QuiryError(
-                  WireStatus.DEADLINE_EXCEEDED,
-                  `Request operation timed out after ${timeout}ms`,
-                  { ...context, detail: { timeout } },
-                ),
-              ),
-            timeout,
-          );
-
-          this.#pending.set(correlation, {
-            kind: "call",
-            object,
-            property: method,
-            timestamp: Date.now(),
-            resolve: (value: unknown) => {
-              release();
-              resolve(value);
-            },
-            reject: fail,
-            timer,
-          } satisfies PendingCallRequest);
-          this.tracker.enter();
-
-          this.ctx.diagnostic.maybe("request:sent")?.({
-            ref: correlation,
-            object,
-            property: method,
-            kind: "call",
-          });
-
-          if (signal) {
-            abortHandler = () => {
-              this.ctx.diagnostic.maybe("request:abort")?.({ ref: correlation });
-              void this.ctx
-                .send<Packets.AbortRequestPacket>({
-                  kind: WireKind.REQUEST,
-                  type: Packets.RequestMessageType.ABORT,
-                  payload: { ref: correlation },
-                })
-                .catch(() => null);
-              fail(new QuiryError(WireStatus.ABORTED, "Request operation cancelled", context));
-            };
-
-            if (signal.aborted) return abortHandler();
-            signal.addEventListener("abort", abortHandler, { once: true });
-          }
-
-          // The session stays up unless the transport itself errors.
-          Promise.resolve(
-            this.ctx.send<Packets.CallRequestPacket>({
-              id: correlation,
+      if (control?.signal) {
+        abortHandler = () => {
+          this.ctx.diagnostic.maybe("request:abort")?.({ ref: correlation });
+          void this.ctx
+            .send<Packets.AbortRequestPacket>({
               kind: WireKind.REQUEST,
-              type: Packets.RequestMessageType.CALL,
-              payload,
-            }),
-          ).catch((cause: unknown) => {
-            fail(new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", { ...context, cause }));
-          });
-        });
-      },
-      {
-        retries: (control?.retry?.maxAttempts ?? this.config.defaultRetry.maxAttempts) - 1,
-        initialDelay: control?.retry?.backoffDelay ?? this.config.defaultRetry.backoffDelay,
-        backoffStrategy: control?.retry?.backoffStrategy ?? this.config.defaultRetry.backoffStrategy,
-        shouldRetry: (error: unknown) => (error instanceof QuiryError ? isRetryableStatus(error.code) : true),
-        signal,
-      },
-    );
+              type: Packets.RequestMessageType.ABORT,
+              payload: { ref: correlation },
+            })
+            .catch(() => null);
+          fail(new QuiryError(WireStatus.ABORTED, "Request operation cancelled", context));
+        };
+
+        if (control?.signal.aborted) return abortHandler();
+        control?.signal.addEventListener("abort", abortHandler, { once: true });
+      }
+
+      // The session stays up unless the transport itself errors.
+      Promise.resolve(
+        this.ctx.send<Packets.CallRequestPacket>({
+          id: correlation,
+          kind: WireKind.REQUEST,
+          type: Packets.RequestMessageType.CALL,
+          payload,
+        }),
+      ).catch((cause: unknown) => {
+        fail(new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", { ...context, cause }));
+      });
+    });
   }
 
   /**
@@ -332,8 +293,7 @@ export class OutboundRequests {
     object: string,
     method: string,
     args: ReadonlyArray<unknown>,
-    control?: Omit<RequestControl, "abortable">,
-    signal?: AbortSignal,
+    control?: OutboundRequestControl,
   ): AsyncIterableIterator<unknown> {
     if (this.ctx.state() !== SessionState.OPEN) {
       const q = new AsyncQueue<unknown>();
@@ -354,7 +314,7 @@ export class OutboundRequests {
     // chunks arriving before the CALL `.then` callback still decrement the
     // right counter (producer cannot start until it sees the credit grant,
     // but other incoming packets are routed concurrently).
-    const credit = { remaining: this.config.creditWindow };
+    const credit = { remaining: this.window };
     const context = { correlationId: correlation, traceId: control?.traceId };
 
     const entry: PendingStreamRequest = {
@@ -368,7 +328,6 @@ export class OutboundRequests {
     };
 
     const cancel = (error: Error): void => {
-      clearTimeout(entry.timer);
       this.#pending.delete(correlation);
       this.tracker.exit();
       queue.fail(error);
@@ -385,19 +344,13 @@ export class OutboundRequests {
         });
     };
 
-    if (control?.timeout) {
-      entry.timer = setTimeout(() => {
-        cancel(new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Stream request timed out", context));
-      }, control.timeout);
-    }
-
-    if (signal) {
+    if (control?.signal) {
       const abortHandler = () => {
         cancel(new QuiryError(WireStatus.ABORTED, "Stream request cancelled", context));
-        signal.removeEventListener("abort", abortHandler);
+        control.signal!.removeEventListener("abort", abortHandler);
       };
-      if (signal.aborted) abortHandler();
-      signal.addEventListener("abort", abortHandler, { once: true });
+      if (control.signal.aborted) abortHandler();
+      control.signal.addEventListener("abort", abortHandler, { once: true });
     }
 
     this.#pending.set(correlation, entry);
@@ -411,7 +364,7 @@ export class OutboundRequests {
     });
     this.ctx.diagnostic.maybe("stream:open")?.({
       ref: correlation,
-      window: this.config.creditWindow,
+      window: this.window,
     });
 
     // Send CALL and initial credit grant. CREDIT is bundled as a separate
@@ -423,25 +376,25 @@ export class OutboundRequests {
           id: correlation,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
-          payload: { object, method, args: substitutes, control },
+          payload: { object, method, args: substitutes },
+          metadata: control !== undefined ? { traceId: control?.traceId, controlled: Boolean(control?.signal) } : undefined,
         });
 
         await this.ctx.send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
           type: Packets.ResponseMessageType.STREAM,
-          payload: { event: "credit", ref: correlation, credit: this.config.creditWindow },
+          payload: { event: "credit", ref: correlation, credit: this.window },
         });
 
         this.ctx.diagnostic.maybe("stream:credit-grant")?.({
           ref: correlation,
-          delta: this.config.creditWindow,
-          remaining: this.config.creditWindow,
+          delta: this.window,
+          remaining: this.window,
           direction: "sent",
         });
       } catch (cause: unknown) {
         const e = this.#pending.get(correlation);
         if (e?.kind === "stream") {
-          clearTimeout(e.timer);
           this.#pending.delete(correlation);
           this.tracker.exit();
           queue.fail(
@@ -463,7 +416,6 @@ export class OutboundRequests {
         });
 
       const e = this.#pending.get(correlation);
-      if (e?.kind === "stream" && e.timer) clearTimeout(e.timer);
       if (this.#pending.delete(correlation)) this.tracker.exit();
     };
 
@@ -524,7 +476,6 @@ export class OutboundRequests {
     const entry = this.#pending.get(ref);
     if (!entry) return; // stale — local already settled (timeout, abort, etc.)
 
-    clearTimeout("timer" in entry ? entry.timer : undefined);
     this.#pending.delete(ref);
     this.tracker.exit();
 
@@ -573,8 +524,8 @@ export class OutboundRequests {
     this.ctx.diagnostic.maybe("stream:chunk")?.({ ref, seq, direction: "received" });
 
     // Replenish credit when half the window is consumed.
-    if (entry.credit.remaining <= Math.floor(this.config.creditWindow / 2)) {
-      const grant = this.config.creditWindow - entry.credit.remaining;
+    if (entry.credit.remaining <= Math.floor(this.window / 2)) {
+      const grant = this.window - entry.credit.remaining;
       entry.credit.remaining += grant;
 
       // Send the delta, not the absolute remaining, and bump the local view up.
@@ -596,7 +547,6 @@ export class OutboundRequests {
   }
 
   #handleStreamEnd({ ref, seq }: Packets.StreamEndPayload, entry: PendingStreamRequest): void {
-    clearTimeout(entry.timer);
     this.#pending.delete(ref);
     this.tracker.exit();
 
@@ -629,7 +579,6 @@ export class OutboundRequests {
     { ref, seq, error: cause }: Packets.StreamErrorPayload,
     entry: PendingStreamRequest,
   ): void {
-    clearTimeout(entry.timer);
     const error = fromWireError(cause);
     entry.queue.fail(error);
     this.#pending.delete(ref);
@@ -654,7 +603,6 @@ export class OutboundRequests {
     for (const [ref, entry] of Array.from(this.#pending)) {
       if (entry.kind !== "stream") continue;
 
-      clearTimeout(entry.timer);
       this.#pending.delete(ref);
       this.tracker.exit();
       entry.queue.fail(

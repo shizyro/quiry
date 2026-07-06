@@ -69,7 +69,7 @@ describe("Session requests", () => {
     });
 
     const error = await pair.consumer
-      .request("svc", "_", [], { retry: { maxAttempts: 0 } })
+      .request("svc", "_", [])
       .catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
@@ -94,7 +94,7 @@ describe("Session requests", () => {
     });
 
     const error = await pair.consumer
-      .request("svc", "_", [], { retry: { maxAttempts: 0 } })
+      .request("svc", "_", [])
       .catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
@@ -120,7 +120,7 @@ describe("Session requests", () => {
     });
 
     const error = await pair.consumer
-      .request("svc", "_", [], { retry: { maxAttempts: 0 } })
+      .request("svc", "_", [])
       .catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
@@ -135,11 +135,11 @@ describe("Session requests", () => {
 
       const start = Date.now();
       const error = await pair.consumer
-        .request("svc", "_", [], { timeout: 20, retry: { maxAttempts: 0 } })
+        .request("svc", "_", [], { signal: AbortSignal.timeout(20) })
         .catch((e: unknown) => e);
       const elapsed = Date.now() - start;
 
-      expect((error as QuiryError).code).toBe(WireStatus.DEADLINE_EXCEEDED);
+      expect((error as QuiryError).code).toBe(WireStatus.ABORTED);
       // A wide window: tight enough to fail if the timer was lost, loose
       // enough to survive CI scheduler jitter.
       expect(elapsed).toBeGreaterThanOrEqual(10);
@@ -152,13 +152,7 @@ describe("Session requests", () => {
       });
 
       const ac = new AbortController();
-      const promise = pair.consumer.request(
-        "svc",
-        "_",
-        [],
-        { timeout: 60_000, retry: { maxAttempts: 0 } },
-        ac.signal,
-      );
+      const promise = pair.consumer.request("svc", "_", [], { signal: ac.signal });
 
       // await new Promise((r) => setTimeout(r, 15));
       expect(pair.consumer.status.pending).toBe(1);
@@ -176,7 +170,7 @@ describe("Session requests", () => {
       ac.abort();
 
       await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 0 } }, ac.signal),
+        pair.consumer.request("svc", "_", [], { signal: ac.signal }),
       ).rejects.toMatchObject({ code: WireStatus.ABORTED });
 
       expect(pair.consumer.status.pending).toBe(0);
@@ -185,94 +179,13 @@ describe("Session requests", () => {
       expect(producerInquiry).not.toHaveBeenCalled();
     });
 
-    it("retries on a retryable status and resolves once the producer recovers", async () => {
-      let attempts = 0;
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: () => {
-            attempts++;
-            if (attempts < 3) throw new QuiryError(WireStatus.UNAVAILABLE, "warming up");
-            return "ok";
-          },
-        }),
-      });
-
-      await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, backoffDelay: 1 } }),
-      ).resolves.toBe("ok");
-      expect(attempts).toBe(3);
-    });
-
-    it("does not retry a non-retryable status, and propagates the original error", async () => {
-      let attempts = 0;
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: () => {
-            attempts++;
-            throw new QuiryError(WireStatus.INVALID_ARGUMENT, "bad");
-          },
-        }),
-      });
-
-      await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 5, backoffDelay: 1 } }),
-      ).rejects.toMatchObject({ code: WireStatus.INVALID_ARGUMENT, message: "bad" });
-      expect(attempts).toBe(1);
-    });
-
-    it("returns the last error once retries are exhausted", async () => {
-      let attempts = 0;
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: () => {
-            attempts++;
-            throw new QuiryError(WireStatus.UNAVAILABLE, "still down");
-          },
-        }),
-      });
-
-      await expect(
-        pair.consumer.request("svc", "_", [], { retry: { maxAttempts: 3, backoffDelay: 1 } }),
-      ).rejects.toMatchObject({ code: WireStatus.UNAVAILABLE, message: "still down" });
-      expect(attempts).toBe(3);
-    });
-
-    it("an abort during retry backoff jumps to immediate rejection, no further attempts", async () => {
-      let attempts = 0;
-      pair = openSessionPair({
-        producerInquiry: () => ({
-          value: () => {
-            attempts++;
-            throw new QuiryError(WireStatus.UNAVAILABLE, "down");
-          },
-        }),
-      });
-
-      const ac = new AbortController();
-      const p = pair.consumer.request(
-        "svc",
-        "_",
-        [],
-        { retry: { maxAttempts: 5, backoffDelay: 1000 } },
-        ac.signal,
-      );
-
-      // await new Promise((r) => setTimeout(r, 50));
-      const start = Date.now();
-      ac.abort();
-
-      await expect(p).rejects.toMatchObject({ code: WireStatus.ABORTED });
-      expect(Date.now() - start).toBeLessThan(200);
-      expect(attempts).toBe(1);
-    });
-
-    it("a force-close drops all pending requests with ABORTED", async () => {
+    it("a force-close drops all pending requests", async () => {
       pair = openSessionPair({
         producerInquiry: () => ({ value: () => new Promise<never>(() => {}) }),
       });
 
       const promises = Array.from({ length: 5 }, () =>
-        pair!.consumer.request("svc", "_", [], { timeout: 60_000, retry: { maxAttempts: 0 } }),
+        pair!.consumer.request("svc", "_", [], { signal: AbortSignal.timeout(60_000) }),
       );
 
       // await new Promise((r) => setTimeout(r, 20));

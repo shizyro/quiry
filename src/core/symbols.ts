@@ -16,3 +16,8 @@ export const identifier: unique symbol = Symbol("quiry.identifier");
  * Used for explicit resource management.
  */
 export const release: unique symbol = Symbol("quiry.callback.release");
+
+/**
+ * A symbol used to assign control options to a call request before it is sent.
+ */
+export const control: unique symbol = Symbol("quiry.control");

@@ -19,8 +19,6 @@ export enum WireStatus {
   CANCELLED,
   /** Argument invalid, malformed, or failed validation. */
   INVALID_ARGUMENT,
-  /** Deadline expired before the call could be completed. */
-  DEADLINE_EXCEEDED,
   /** The requested object or property does not exist. */
   NOT_FOUND,
   /** Data lost during transmission. */
@@ -33,12 +31,13 @@ export enum WireStatus {
   FAILED_PRECONDITION,
   /** Unhandled exception or error. */
   INTERNAL,
-  /** Handler returned a value that is not of the expected type. */
+  /**
+   * Handler returned a value that is not of the expected type.
+   * @deprecated
+   */
   MALFORMED_RESPONSE,
   /** Peer is not reachable or the transport failed. */
   UNAVAILABLE,
-  /** Peer died. */
-  PEER_GONE,
   /** Peer is draining and will not accept new work. */
   DRAINING,
   /** Concurrency limit exceeded on this thread or globally. */
@@ -54,6 +53,7 @@ export interface WirePacket<TKind extends WireKind = WireKind, TPayload = unknow
   readonly kind: TKind;
   readonly timestamp: number;
   readonly payload: TPayload;
+  readonly metadata?: Record<string, unknown>;
 }
 
 /**
@@ -75,18 +75,4 @@ export interface WireError {
   /** Depth-capped by `MAX_CAUSE_DEPTH`. */
   readonly cause?: WireError;
   readonly timestamp: number;
-}
-
-/** Request control options; used to define request behavior */
-export interface RequestControl {
-  readonly timeout?: number;
-  readonly retry?: RetryPolicy;
-  readonly abortable?: boolean;
-  readonly traceId?: TraceId;
-}
-
-export interface RetryPolicy {
-  readonly maxAttempts?: number;
-  readonly backoffStrategy?: "fixed" | "exponential";
-  readonly backoffDelay?: number;
 }

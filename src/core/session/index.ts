@@ -1,5 +1,5 @@
 import * as Packets from "../../protocol/packets";
-import { WireKind, WireStatus, type RequestControl, type RetryPolicy } from "../../protocol/wire";
+import { WireKind, WireStatus } from "../../protocol/wire";
 import type { CorrelationId } from "../../protocol/types";
 
 import { EventEmitter } from "node:events";
@@ -63,13 +63,13 @@ interface InteractiveRouter {
   ): Unsubscribe;
 }
 
-export interface SessionConfig {
-  readonly defaultTimeout?: number;
-  readonly defaultRetry?: RetryPolicy;
-  readonly drainTimeout?: number;
-  /** The number of chunks to prefetch for each streaming request. */
-  readonly creditWindow?: number;
+interface SessionOptions {
+  drainTimeout?: number;
+  creditWindow?: number;
 }
+
+const DEFAULT_DRAIN_TIMEOUT: number = 5000;
+const DEFAULT_CREDIT_WINDOW: number = 100;
 
 /** Public lifecycle events. Domain-level only. */
 export interface SessionEvents {
@@ -89,12 +89,11 @@ export class Session {
   }
 
   private readonly emitter = new EventEmitter();
-  readonly diagnostic = new DiagnosticBus<DiagnosticSessionEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
+  private readonly router: Router<Packets.AnyPacket>;
+  private readonly options: Required<SessionOptions>;
 
   #state: SessionState = SessionState.CLOSED;
-
-  private readonly config: DeepRequired<SessionConfig>;
-  private readonly router: Router<Packets.AnyPacket>;
+  readonly diagnostic = new DiagnosticBus<DiagnosticSessionEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
 
   /** A wrapper around the internal router to provide a more convenient API. */
   get channel(): InteractiveRouter {
@@ -103,8 +102,6 @@ export class Session {
         this.router
           .wait<any>((packet) => packet.kind === kind && (predicate ? predicate(packet) : true), options)
           .catch((cause: unknown) => {
-            if (cause instanceof Error && cause.message.includes("Timeout"))
-              throw new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Timeout waiting for packet", { cause });
             throw new QuiryError(WireStatus.ABORTED, "Operation was aborted", { cause });
           }),
       listen: (kind, predicate, handler) =>
@@ -131,19 +128,13 @@ export class Session {
 
   constructor(
     private readonly transport: Transport<Packets.AnyPacket>,
-    inquiry: InquiryFunc,
-    config: SessionConfig = {},
+    readonly inquiry: InquiryFunc,
+    options: SessionOptions = {},
   ) {
     this.router = new Router(this.transport.receive());
-    this.config = {
-      defaultTimeout: config.defaultTimeout ?? 10_000,
-      drainTimeout: config.drainTimeout ?? 5000,
-      creditWindow: config.creditWindow ?? 100,
-      defaultRetry: {
-        maxAttempts: config.defaultRetry?.maxAttempts ?? 3,
-        backoffDelay: config.defaultRetry?.backoffDelay ?? 1000,
-        backoffStrategy: config.defaultRetry?.backoffStrategy ?? "exponential",
-      },
+    this.options = {
+      drainTimeout: options.drainTimeout ?? DEFAULT_DRAIN_TIMEOUT,
+      creditWindow: options.creditWindow ?? DEFAULT_CREDIT_WINDOW,
     };
 
     const base: Omit<SessionContext, "callbacks"> = {
@@ -154,18 +145,11 @@ export class Session {
       ): Promise<CorrelationId> => this.send<P>(packet),
       correlate: () => Session.correlate(),
     };
-    this.callbacks = new CallbackBridge(base, { defaultTimeout: this.config.defaultTimeout });
+    this.callbacks = new CallbackBridge(base);
 
     const ctx: SessionContext = { ...base, callbacks: this.callbacks };
-    this.outbound = new OutboundRequests(ctx, {
-      defaultTimeout: this.config.defaultTimeout,
-      defaultRetry: this.config.defaultRetry,
-      creditWindow: this.config.creditWindow,
-    });
-    this.inbound = new InboundRequests(ctx, inquiry, {
-      defaultTimeout: this.config.defaultTimeout,
-      creditWindow: this.config.creditWindow,
-    });
+    this.outbound = new OutboundRequests(ctx, this.options.creditWindow);
+    this.inbound = new InboundRequests(ctx, inquiry);
 
     this.coordinator = new DrainCoordinator({
       state: () => this.#state,
@@ -183,7 +167,7 @@ export class Session {
       outbound: this.outbound,
       callbacks: this.callbacks,
       terminate: (reason) => this.terminate(reason),
-      config: { drainTimeout: this.config.drainTimeout },
+      config: { drainTimeout: this.options.drainTimeout },
     });
   }
 
@@ -309,32 +293,15 @@ export class Session {
 
   // --------- PUBLIC API: REQUESTS & CALLBACKS --------- //
 
-  set(object: string, property: string, value: unknown): Promise<true> {
-    return this.outbound.set(object, property, value);
+  readonly set: typeof this.outbound.set = (...args) => this.outbound.set(...args);
+  readonly get: typeof this.outbound.get = (...args) => this.outbound.get(...args);
+
+  request(...args: Parameters<typeof this.outbound.request>): Promise<unknown> {
+    return this.outbound.request(...args);
   }
 
-  get(object: string, property: string): Promise<unknown> {
-    return this.outbound.get(object, property);
-  }
-
-  request(
-    object: string,
-    method: string,
-    args: ReadonlyArray<unknown>,
-    control?: Omit<RequestControl, "abortable">,
-    signal?: AbortSignal,
-  ): Promise<unknown> {
-    return this.outbound.request(object, method, args, control, signal);
-  }
-
-  stream(
-    object: string,
-    method: string,
-    args: ReadonlyArray<unknown>,
-    control?: Omit<RequestControl, "abortable">,
-    signal?: AbortSignal,
-  ): AsyncIterableIterator<unknown> {
-    return this.outbound.stream(object, method, args, control, signal);
+  stream(...args: Parameters<typeof this.outbound.stream>): AsyncIterableIterator<unknown> {
+    return this.outbound.stream(...args);
   }
 
   // --------- INTERNALS: ROUTING --------- //
@@ -457,7 +424,7 @@ export class Session {
     let error: QuiryError;
     switch (kind) {
       case "terminate":
-        error = new QuiryError(WireStatus.PEER_GONE, message, { cause });
+        error = new QuiryError(WireStatus.UNAVAILABLE, message, { cause });
         break;
       case "receive":
         error = new QuiryError(WireStatus.DATA_LOSS, message, { cause });
@@ -489,7 +456,3 @@ export interface SessionStatus {
   readonly stubs: number;
   readonly backpressure: BackpressureSignal;
 }
-
-type DeepRequired<T> = Required<{
-  [K in keyof T]: T[K] extends Required<T[K]> ? T[K] : DeepRequired<T[K]>;
-}>;

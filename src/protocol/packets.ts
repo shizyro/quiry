@@ -1,4 +1,4 @@
-import type { WireKind, WirePacket, WireError, WireStatus, RequestControl } from "./wire";
+import type { WireKind, WirePacket, WireError, WireStatus } from "./wire";
 import type { CorrelationId, InvocationId, CallbackId } from "./types";
 
 /** Typed wire packet with message type discrimination. */
@@ -44,7 +44,6 @@ export type CallPayload = {
   readonly object: string;
   readonly method: string;
   readonly args: ReadonlyArray<unknown>;
-  readonly control?: RequestControl;
 };
 
 export interface CallRequestPacket

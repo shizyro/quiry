@@ -1,12 +1,12 @@
 import * as Packets from "../../../protocol/packets";
 import { WireKind, WireStatus } from "../../../protocol/wire";
-import type { CorrelationId } from "../../../protocol/types";
+import type { CorrelationId, TraceId } from "../../../protocol/types";
 
 import { InFlightTracker } from "../../../lib/tracker";
 
 import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
-import { abortable, timeout } from "../../../lib/utils";
+import { abortable } from "../../../lib/utils";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
@@ -27,11 +27,6 @@ interface OutboundStream<T = unknown> {
   timestamp: number;
 }
 
-export interface InboundRequestsConfig {
-  readonly defaultTimeout: number;
-  readonly creditWindow: number;
-}
-
 /**
  * Producer-side request servicing: dispatches inbound REQUEST packets to
  * the {@link InquiryFunc}, owns the per-request abort controllers, and
@@ -50,7 +45,6 @@ export class InboundRequests {
   constructor(
     private readonly ctx: SessionContext,
     private readonly inquiry: InquiryFunc,
-    private readonly config: InboundRequestsConfig,
   ) {}
 
   // --------- PACKET HANDLING --------- //
@@ -92,7 +86,7 @@ export class InboundRequests {
       const startedAt = Date.now();
       const context = {
         correlationId: packet.id,
-        traceId: "control" in packet.payload ? packet.payload.control?.traceId : undefined,
+        traceId: packet.metadata?.traceId as TraceId | undefined,
       };
       const reqKind: "set" | "get" | "call" =
         packet.type === Packets.RequestMessageType.SET
@@ -130,26 +124,6 @@ export class InboundRequests {
         return;
       }
 
-      if (
-        "control" in packet.payload &&
-        packet.payload.control?.timeout !== undefined &&
-        Date.now() - packet.timestamp >= packet.payload.control.timeout
-      ) {
-        await this.ctx.send<Packets.ValueResponsePacket>({
-          kind: WireKind.RESPONSE,
-          type: Packets.ResponseMessageType.VALUE,
-          payload: {
-            ref: packet.id,
-            status: WireStatus.DEADLINE_EXCEEDED,
-            error: toWireError(
-              new QuiryError(WireStatus.DEADLINE_EXCEEDED, "Request operation timed out", context),
-            ),
-          },
-        });
-        settled(WireStatus.DEADLINE_EXCEEDED);
-        return;
-      }
-
       // dispatch the request to inquiry
       // TODO: maybe something like a semaphore to limit the number of concurrent requests
 
@@ -159,7 +133,7 @@ export class InboundRequests {
       };
 
       let controller: AbortController | undefined;
-      if ("control" in packet.payload && packet.payload.control?.abortable) {
+      if ("control" in packet.payload && packet.metadata?.controlled === true) {
         controller = new AbortController();
         this.controllers.set(packet.id, controller);
       }
@@ -202,17 +176,8 @@ export class InboundRequests {
               return;
             }
 
-            result = await abortable(
-              timeout(
-                Promise.resolve(value),
-                ("control" in packet.payload && packet.payload.control?.timeout !== undefined
-                  ? packet.payload.control.timeout
-                  : this.config.defaultTimeout) -
-                  (Date.now() - packet.timestamp),
-                "Timeout waiting for inquiry response",
-              ),
-              controller?.signal,
-            ).finally(() => controller && this.controllers.delete(packet.id));
+            result = await abortable(Promise.resolve(value), controller?.signal)
+              .finally(() => controller && this.controllers.delete(packet.id));
 
             break;
           }
@@ -322,7 +287,6 @@ export class InboundRequests {
       timestamp: Date.now(),
     };
     this.#outbound_streams.set(ref, stream);
-    this.ctx.diagnostic.maybe("stream:open")?.({ ref, window: this.config.creditWindow });
 
     let seq = 0;
     try {
