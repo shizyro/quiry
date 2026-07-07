@@ -1,6 +1,6 @@
 import * as Packets from "../../../protocol/packets";
 import { WireKind, WireStatus } from "../../../protocol/wire";
-import type { CorrelationId, TraceId } from "../../../protocol/types";
+import type { CorrelationId } from "../../../protocol/types";
 
 import { AsyncQueue } from "../../../lib/queue";
 import { InFlightTracker } from "../../../lib/tracker";
@@ -45,11 +45,6 @@ interface PendingStreamRequest extends RequestDiagnosticContext {
 
 type PendingRequest = PendingGetRequest | PendingSetRequest | PendingCallRequest | PendingStreamRequest;
 
-interface OutboundRequestControl {
-  signal?: AbortSignal;
-  traceId?: TraceId;
-}
-
 /**
  * Owns the pending requests correlation map keyed by outbound packet id. Every
  * outbound request bumps the {@link InFlightTracker} so the drain coordinator
@@ -67,7 +62,7 @@ export class OutboundRequests {
 
   constructor(
     private readonly ctx: SessionContext,
-    private readonly window: number
+    private readonly window: number,
   ) {}
 
   // --------- PUBLIC: REQUESTS --------- //
@@ -77,18 +72,18 @@ export class OutboundRequests {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
 
-    const correlation = this.ctx.correlate();
-    const substitute = this.ctx.callbacks.substitute(unwrapSerialized(value), correlation);
+    const cid = this.ctx.correlate();
+    const substitute = this.ctx.callbacks.substitute(unwrapSerialized(value), cid);
     if (!isSerializable(substitute))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Value is not serializable");
 
     const startedAt = Date.now();
     return new Promise<true>((resolve, reject) => {
       const cleanup = (): void => {
-        if (this.#pending.delete(correlation)) this.tracker.exit();
+        if (this.#pending.delete(cid)) this.tracker.exit();
       };
 
-      this.#pending.set(correlation, {
+      this.#pending.set(cid, {
         kind: "set",
         object,
         property,
@@ -104,7 +99,7 @@ export class OutboundRequests {
       });
       this.tracker.enter();
       this.ctx.diagnostic.maybe("request:sent")?.({
-        ref: correlation,
+        ref: cid,
         object,
         property,
         kind: "set",
@@ -112,19 +107,14 @@ export class OutboundRequests {
 
       void this.ctx
         .send<Packets.SetRequestPacket>({
-          id: correlation,
+          id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.SET,
           payload: { object, property, value: substitute },
         })
         .catch((cause: unknown) => {
           cleanup();
-          reject(
-            new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", {
-              correlationId: correlation,
-              cause,
-            }),
-          );
+          reject(new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", { cid, cause }));
         });
     });
   }
@@ -134,14 +124,14 @@ export class OutboundRequests {
       throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
 
-    const correlation = this.ctx.correlate();
+    const cid = this.ctx.correlate();
     const startedAt = Date.now();
     return new Promise<unknown>((resolve, reject) => {
       const cleanup = (): void => {
-        if (this.#pending.delete(correlation)) this.tracker.exit();
+        if (this.#pending.delete(cid)) this.tracker.exit();
       };
 
-      this.#pending.set(correlation, {
+      this.#pending.set(cid, {
         kind: "get",
         object,
         property,
@@ -157,7 +147,7 @@ export class OutboundRequests {
       });
       this.tracker.enter();
       this.ctx.diagnostic.maybe("request:sent")?.({
-        ref: correlation,
+        ref: cid,
         object,
         property,
         kind: "get",
@@ -165,19 +155,14 @@ export class OutboundRequests {
 
       void this.ctx
         .send<Packets.GetRequestPacket>({
-          id: correlation,
+          id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.GET,
           payload: { object, property },
         })
         .catch((cause: unknown) => {
           cleanup();
-          reject(
-            new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", {
-              correlationId: correlation,
-              cause,
-            }),
-          );
+          reject(new QuiryError(WireStatus.DATA_LOSS, "Failed to send packet", { cid, cause }));
         });
     });
   }
@@ -189,16 +174,14 @@ export class OutboundRequests {
     object: string,
     method: string,
     args: ReadonlyArray<unknown>,
-    control?: OutboundRequestControl,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (this.ctx.state() !== SessionState.OPEN) {
-      throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open", {
-        traceId: control?.traceId,
-      });
+      throw new QuiryError(WireStatus.UNAVAILABLE, "Session is not open");
     }
 
-    const correlation = this.ctx.correlate();
-    const substitutes = this.ctx.callbacks.substitute(unwrapSerialized(args), correlation);
+    const cid = this.ctx.correlate();
+    const substitutes = this.ctx.callbacks.substitute(unwrapSerialized(args), cid);
     // Ensure arguments can be cloned through port.
     if (!isSerializable(substitutes))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
@@ -210,7 +193,7 @@ export class OutboundRequests {
       method,
       args: substitutes,
     } satisfies Packets.CallRequestPacket["payload"];
-    const context = { correlationId: correlation, traceId: control?.traceId };
+    const context = { cid };
 
     return new Promise<unknown>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -222,11 +205,11 @@ export class OutboundRequests {
           clearTimeout(timer);
           timer = null;
         }
-        if (abortHandler && control?.signal) {
-          control?.signal.removeEventListener("abort", abortHandler);
+        if (abortHandler && signal) {
+          signal.removeEventListener("abort", abortHandler);
           abortHandler = null;
         }
-        if (this.#pending.delete(correlation)) this.tracker.exit();
+        if (this.#pending.delete(cid)) this.tracker.exit();
       };
 
       const fail = (error: Error): void => {
@@ -234,7 +217,7 @@ export class OutboundRequests {
         reject(error);
       };
 
-      this.#pending.set(correlation, {
+      this.#pending.set(cid, {
         kind: "call",
         object,
         property: method,
@@ -248,33 +231,33 @@ export class OutboundRequests {
       this.tracker.enter();
 
       this.ctx.diagnostic.maybe("request:sent")?.({
-        ref: correlation,
+        ref: cid,
         object,
         property: method,
         kind: "call",
       });
 
-      if (control?.signal) {
+      if (signal) {
         abortHandler = () => {
-          this.ctx.diagnostic.maybe("request:abort")?.({ ref: correlation });
+          this.ctx.diagnostic.maybe("request:abort")?.({ ref: cid });
           void this.ctx
             .send<Packets.AbortRequestPacket>({
               kind: WireKind.REQUEST,
               type: Packets.RequestMessageType.ABORT,
-              payload: { ref: correlation },
+              payload: { ref: cid },
             })
             .catch(() => null);
           fail(new QuiryError(WireStatus.ABORTED, "Request operation cancelled", context));
         };
 
-        if (control?.signal.aborted) return abortHandler();
-        control?.signal.addEventListener("abort", abortHandler, { once: true });
+        if (signal.aborted) return abortHandler();
+        signal.addEventListener("abort", abortHandler, { once: true });
       }
 
       // The session stays up unless the transport itself errors.
       Promise.resolve(
         this.ctx.send<Packets.CallRequestPacket>({
-          id: correlation,
+          id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
           payload,
@@ -293,7 +276,7 @@ export class OutboundRequests {
     object: string,
     method: string,
     args: ReadonlyArray<unknown>,
-    control?: OutboundRequestControl,
+    signal?: AbortSignal,
   ): AsyncIterableIterator<unknown> {
     if (this.ctx.state() !== SessionState.OPEN) {
       const q = new AsyncQueue<unknown>();
@@ -301,8 +284,8 @@ export class OutboundRequests {
       return q;
     }
 
-    const correlation = this.ctx.correlate();
-    const substitutes = this.ctx.callbacks.substitute(unwrapSerialized(args), correlation);
+    const cid = this.ctx.correlate();
+    const substitutes = this.ctx.callbacks.substitute(unwrapSerialized(args), cid);
     // Ensure arguments can be cloned through port.
     if (!isSerializable(substitutes))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
@@ -315,7 +298,7 @@ export class OutboundRequests {
     // right counter (producer cannot start until it sees the credit grant,
     // but other incoming packets are routed concurrently).
     const credit = { remaining: this.window };
-    const context = { correlationId: correlation, traceId: control?.traceId };
+    const context = { cid };
 
     const entry: PendingStreamRequest = {
       kind: "stream",
@@ -328,42 +311,42 @@ export class OutboundRequests {
     };
 
     const cancel = (error: Error): void => {
-      this.#pending.delete(correlation);
+      this.#pending.delete(cid);
       this.tracker.exit();
       queue.fail(error);
 
-      this.ctx.diagnostic.maybe("stream:cancel")?.({ ref: correlation, source: "local" });
+      this.ctx.diagnostic.maybe("stream:cancel")?.({ ref: cid, source: "local" });
       void this.ctx
         .send<Packets.CancelRequestPacket>({
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CANCEL,
-          payload: { ref: correlation },
+          payload: { ref: cid },
         })
         .catch(() => {
           // Observable; deadline already fired locally.
         });
     };
 
-    if (control?.signal) {
+    if (signal) {
       const abortHandler = () => {
         cancel(new QuiryError(WireStatus.ABORTED, "Stream request cancelled", context));
-        control.signal!.removeEventListener("abort", abortHandler);
+        signal!.removeEventListener("abort", abortHandler);
       };
-      if (control.signal.aborted) abortHandler();
-      control.signal.addEventListener("abort", abortHandler, { once: true });
+      if (signal.aborted) abortHandler();
+      signal.addEventListener("abort", abortHandler, { once: true });
     }
 
-    this.#pending.set(correlation, entry);
+    this.#pending.set(cid, entry);
     this.tracker.enter();
 
     this.ctx.diagnostic.maybe("request:sent")?.({
-      ref: correlation,
+      ref: cid,
       object,
       property: method,
       kind: "stream",
     });
     this.ctx.diagnostic.maybe("stream:open")?.({
-      ref: correlation,
+      ref: cid,
       window: this.window,
     });
 
@@ -373,29 +356,29 @@ export class OutboundRequests {
     void (async () => {
       try {
         await this.ctx.send<Packets.CallRequestPacket>({
-          id: correlation,
+          id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
           payload: { object, method, args: substitutes },
-          metadata: control !== undefined ? { traceId: control?.traceId, controlled: Boolean(control?.signal) } : undefined,
+          metadata: signal !== undefined ? { controlled: true } : undefined,
         });
 
         await this.ctx.send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
           type: Packets.ResponseMessageType.STREAM,
-          payload: { event: "credit", ref: correlation, credit: this.window },
+          payload: { event: "credit", ref: cid, credit: this.window },
         });
 
         this.ctx.diagnostic.maybe("stream:credit-grant")?.({
-          ref: correlation,
+          ref: cid,
           delta: this.window,
           remaining: this.window,
           direction: "sent",
         });
       } catch (cause: unknown) {
-        const e = this.#pending.get(correlation);
+        const e = this.#pending.get(cid);
         if (e?.kind === "stream") {
-          this.#pending.delete(correlation);
+          this.#pending.delete(cid);
           this.tracker.exit();
           queue.fail(
             new QuiryError(WireStatus.DATA_LOSS, "Failed to initiate stream", { ...context, cause }),
@@ -409,14 +392,14 @@ export class OutboundRequests {
         .send<Packets.CancelRequestPacket>({
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CANCEL,
-          payload: { ref: correlation },
+          payload: { ref: cid },
         })
         .catch(() => {
           // Observable; consumer already abandoned the iterator.
         });
 
-      const e = this.#pending.get(correlation);
-      if (this.#pending.delete(correlation)) this.tracker.exit();
+      const e = this.#pending.get(cid);
+      if (this.#pending.delete(cid)) this.tracker.exit();
     };
 
     return {
@@ -482,10 +465,7 @@ export class OutboundRequests {
     if (entry.kind === "stream") {
       // User tried streaming a unary method.
       entry.queue.fail(
-        new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot stream a unary method.", {
-          correlationId: ref,
-          detail: { packetId: packet.id },
-        }),
+        new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot stream a unary method.", { cid: ref }),
       );
 
       this.ctx.diagnostic.maybe("request:settled")?.({
@@ -557,7 +537,7 @@ export class OutboundRequests {
       // Producer's reported "next seq" doesn't match — a chunk was lost.
       entry.queue.fail(
         new QuiryError(WireStatus.DATA_LOSS, "Stream ended with unexpected sequence (gap detected)", {
-          correlationId: ref,
+          cid: ref,
           detail: { expected: entry.seq, actual: seq },
         }),
       );
@@ -600,23 +580,19 @@ export class OutboundRequests {
    * indefinitely and would otherwise block the deadline.
    */
   cancelStreams(reason: string = "drained"): void {
-    for (const [ref, entry] of Array.from(this.#pending)) {
+    for (const [cid, entry] of Array.from(this.#pending)) {
       if (entry.kind !== "stream") continue;
 
-      this.#pending.delete(ref);
+      this.#pending.delete(cid);
       this.tracker.exit();
-      entry.queue.fail(
-        new QuiryError(WireStatus.ABORTED, `Stream aborted by session ${reason}`, {
-          correlationId: ref,
-        }),
-      );
+      entry.queue.fail(new QuiryError(WireStatus.ABORTED, `Stream aborted by session ${reason}`, { cid }));
 
-      this.ctx.diagnostic.maybe("stream:cancel")?.({ ref, source: "local" });
+      this.ctx.diagnostic.maybe("stream:cancel")?.({ ref: cid, source: "local" });
       void this.ctx
         .send<Packets.CancelRequestPacket>({
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CANCEL,
-          payload: { ref },
+          payload: { ref: cid },
         })
         .catch(() => {});
     }

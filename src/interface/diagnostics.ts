@@ -83,7 +83,7 @@ export interface SessionEvents {
   "callback:invoke": WithRef<
     {
       readonly eid: InvocationId;
-      readonly id: CallbackId;
+      readonly cbid: CallbackId;
     },
     true
   >;
@@ -95,7 +95,7 @@ export interface SessionEvents {
     },
     true
   >;
-  "callback:release": { readonly id: CallbackId; readonly reason: CallbackReleaseReason };
+  "callback:release": { readonly cbid: CallbackId; readonly reason: CallbackReleaseReason };
   "drain:phase": { readonly initiator: DrainInitiator; readonly phase: DrainPhase };
   "transport:error": { readonly kind: TransportErrorKind; readonly message: string };
   "transport:backpressure": { readonly state: BackpressureStateLiteral; readonly depth: number };

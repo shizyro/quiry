@@ -1,4 +1,4 @@
-import type { CorrelationId, TraceId } from "./types";
+import type { CorrelationId } from "./types";
 
 /** Wire protocol enums */
 export const WireKind = {
@@ -67,8 +67,7 @@ export interface WirePacket<TKind extends WireKind = WireKind, TPayload = unknow
 export interface WireError {
   readonly status: Exclude<WireStatus, typeof WireStatus.OK>;
   readonly message: string;
-  readonly correlationId?: CorrelationId;
-  readonly traceId?: TraceId;
+  readonly cid?: CorrelationId;
   readonly detail?: Record<string, unknown>;
   /** Remote origin's stack, if available. Reattached to the local rebuilt error. */
   readonly stack?: string;

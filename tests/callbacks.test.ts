@@ -160,7 +160,7 @@ describe("Session callbacks", () => {
     });
 
     const listenerFn = vi.fn();
-    pair.consumer.diagnostic.once("callback:release", ({ id }) => listenerFn(id));
+    pair.consumer.diagnostic.once("callback:release", ({ cbid: id }) => listenerFn(id));
 
     const cb = pair.consumer.proxy(sessionFn);
     const result = await pair.consumer.request("svc", "_", [cb, () => "local"]);
@@ -286,7 +286,7 @@ describe("Session callbacks", () => {
         interval: 10,
       });
       expect(followUp).toHaveBeenCalledTimes(1); // This is in case of double release; should be only once.
-      expect(followUp).toHaveBeenCalledWith({ id: cbId, reason: "gc" });
+      expect(followUp).toHaveBeenCalledWith({ cbid: cbId, reason: "gc" });
     });
 
     it("a remote proxy is released automatically when collected on the consumer side", async () => {
@@ -313,7 +313,7 @@ describe("Session callbacks", () => {
         interval: 10,
       });
       expect(followUp).toHaveBeenCalledTimes(1);
-      expect(followUp).toHaveBeenCalledWith({ id: cbId, reason: "remote-gc" });
+      expect(followUp).toHaveBeenCalledWith({ cbid: cbId, reason: "remote-gc" });
     });
   });
 });

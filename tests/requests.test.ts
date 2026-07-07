@@ -68,9 +68,7 @@ describe("Session requests", () => {
       }),
     });
 
-    const error = await pair.consumer
-      .request("svc", "_", [])
-      .catch((e: unknown) => e);
+    const error = await pair.consumer.request("svc", "_", []).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
     expect(error).toMatchObject({
@@ -93,9 +91,7 @@ describe("Session requests", () => {
       }),
     });
 
-    const error = await pair.consumer
-      .request("svc", "_", [])
-      .catch((e: unknown) => e);
+    const error = await pair.consumer.request("svc", "_", []).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
     expect((error as QuiryError).code).toBe(WireStatus.INTERNAL);
@@ -119,9 +115,7 @@ describe("Session requests", () => {
       producerInquiry: () => ({ value: () => Symbol("nope") }),
     });
 
-    const error = await pair.consumer
-      .request("svc", "_", [])
-      .catch((e: unknown) => e);
+    const error = await pair.consumer.request("svc", "_", []).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
     expect((error as QuiryError).code).toBe(WireStatus.INTERNAL);
@@ -135,7 +129,7 @@ describe("Session requests", () => {
 
       const start = Date.now();
       const error = await pair.consumer
-        .request("svc", "_", [], { signal: AbortSignal.timeout(20) })
+        .request("svc", "_", [], AbortSignal.timeout(20))
         .catch((e: unknown) => e);
       const elapsed = Date.now() - start;
 
@@ -152,7 +146,7 @@ describe("Session requests", () => {
       });
 
       const ac = new AbortController();
-      const promise = pair.consumer.request("svc", "_", [], { signal: ac.signal });
+      const promise = pair.consumer.request("svc", "_", [], ac.signal);
 
       // await new Promise((r) => setTimeout(r, 15));
       expect(pair.consumer.status.pending).toBe(1);
@@ -169,9 +163,9 @@ describe("Session requests", () => {
       const ac = new AbortController();
       ac.abort();
 
-      await expect(
-        pair.consumer.request("svc", "_", [], { signal: ac.signal }),
-      ).rejects.toMatchObject({ code: WireStatus.ABORTED });
+      await expect(pair.consumer.request("svc", "_", [], ac.signal)).rejects.toMatchObject({
+        code: WireStatus.ABORTED,
+      });
 
       expect(pair.consumer.status.pending).toBe(0);
 
@@ -185,7 +179,7 @@ describe("Session requests", () => {
       });
 
       const promises = Array.from({ length: 5 }, () =>
-        pair!.consumer.request("svc", "_", [], { signal: AbortSignal.timeout(60_000) }),
+        pair!.consumer.request("svc", "_", [], AbortSignal.timeout(60_000)),
       );
 
       // await new Promise((r) => setTimeout(r, 20));

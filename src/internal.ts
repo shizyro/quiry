@@ -20,7 +20,9 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
     return this.session.diagnostic;
   }
 
-  remote<TOverride extends RemoteImpl = never, TName extends string = string>(name: TName): Remote<
+  remote<TOverride extends RemoteImpl = never, TName extends string = string>(
+    name: TName,
+  ): Remote<
     [TOverride] extends [never] ? (TName extends keyof TObjects ? TObjects[TName] : RemoteImpl) : TOverride
   > {
     let proxy = this.cached.get(name) as Remote<unknown>;
@@ -112,8 +114,9 @@ function makeRemoteObjectProxy(object: string, session: Session): object {
 
             case QuirySymbol.control:
               return (signal: AbortSignal) => {
-                return (...args: unknown[]) => makeCallOrStream(object, key, args, session, callerStack, signal)
-              }
+                return (...args: unknown[]) =>
+                  makeCallOrStream(object, key, args, session, callerStack, signal);
+              };
 
             default:
               throw new QuiryError(
@@ -142,8 +145,7 @@ function makeRemoteObjectProxy(object: string, session: Session): object {
  * first wins, and subsequent attempts to use the other interface throw.
  */
 interface CallOrStream<T = unknown>
-  extends PromiseLike<T>,
-    AsyncIterableIterator<T extends AsyncIterable<infer C> ? C : T> {}
+  extends PromiseLike<T>, AsyncIterableIterator<T extends AsyncIterable<infer C> ? C : T> {}
 
 enum QueryMode {
   PENDING = 0,
@@ -174,7 +176,7 @@ function makeCallOrStream<T = unknown>(
 
     mode = QueryMode.CALL;
     return (call ??= session
-      .request(object, method, args, { signal })
+      .request(object, method, args, signal)
       .catch((error: unknown) => Promise.reject(tag(error))));
   };
 
@@ -187,7 +189,7 @@ function makeCallOrStream<T = unknown>(
     mode = QueryMode.STREAM;
     if (iter) return iter;
 
-    const source = session.stream(object, method, args, { signal });
+    const source = session.stream(object, method, args, signal);
     iter = {
       [Symbol.asyncIterator](): AsyncIterableIterator<unknown> {
         return this;

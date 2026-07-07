@@ -51,21 +51,21 @@ export class CallbackRegistry {
    * Registers a callback with the given scope and optional correlation ID.
    */
   register(fn: Function, scope: CallbackScope.SESSION): CallbackId;
-  register(fn: Function, scope: CallbackScope.CALL, ref: CorrelationId): CallbackId;
-  register(fn: Function, scope: CallbackScope, ref?: CorrelationId): CallbackId {
-    if (scope === CallbackScope.CALL && !ref) {
+  register(fn: Function, scope: CallbackScope.CALL, cid: CorrelationId): CallbackId;
+  register(fn: Function, scope: CallbackScope, cid?: CorrelationId): CallbackId {
+    if (scope === CallbackScope.CALL && !cid) {
       throw new Error("A bound callback must be registered with a correlation ID.");
     }
 
     const id = CallbackRegistry.genid();
-    const entry = { id, fn, scope, ref: ref! } satisfies CallbackEntry;
+    const entry = { id, fn, scope, ref: cid! } satisfies CallbackEntry;
 
     this.#by_id.set(id, entry);
     if (scope === CallbackScope.CALL) {
-      let set = this.#by_ref.get(ref!);
+      let set = this.#by_ref.get(cid!);
       if (!set) {
         set = new Set();
-        this.#by_ref.set(ref!, set);
+        this.#by_ref.set(cid!, set);
       }
       set.add(id);
     } else {
@@ -92,16 +92,16 @@ export class CallbackRegistry {
   }
 
   /**
-   * Removes all `CALL`-scoped callbacks registered under `ref` and returns their ids.
+   * Removes all `CALL`-scoped callbacks registered under correlated packet and returns their ids.
    * Used after a request completes to bulk-release all function arguments that were
    * substituted as stubs for that request.
    */
-  releaseScoped(ref: CorrelationId): ReadonlyArray<CallbackId> {
-    const set = this.#by_ref.get(ref);
+  releaseScoped(cid: CorrelationId): ReadonlyArray<CallbackId> {
+    const set = this.#by_ref.get(cid);
     if (!set || set.size === 0) return [];
 
     for (const id of set) this.#by_id.delete(id);
-    this.#by_ref.delete(ref);
+    this.#by_ref.delete(cid);
     return Array.from(set);
   }
 
@@ -132,14 +132,14 @@ export class CallbackRegistry {
    * Already-substituted {@link CallbackStub} stubs pass through untouched. Cycles are
    * detected and short-circuited.
    */
-  substitute<T>(value: T, ref?: CorrelationId): T {
+  substitute<T>(value: T, cid?: CorrelationId): T {
     const seen = new WeakMap<object, unknown>();
-    const scope = ref ? CallbackScope.CALL : CallbackScope.SESSION;
+    const scope = cid ? CallbackScope.CALL : CallbackScope.SESSION;
 
     const walk = (block: unknown): unknown => {
       if (typeof block === "function") {
         // @ts-expect-error - `scope` is always `CallbackScope.CALL` or `CallbackScope.SESSION`
-        const id = this.register(block, scope, ref);
+        const id = this.register(block, scope, cid);
         return { [stub]: true, id, scope } satisfies CallbackStub;
       }
 

@@ -67,13 +67,11 @@ export class CallbackBridge {
   readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
   readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
 
-  constructor(
-    private readonly ctx: BridgeContext,
-  ) {
-    this.localFinalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
+  constructor(private readonly ctx: BridgeContext) {
+    this.localFinalization = new FinalizationRegistry<CallbackId>((cbid: CallbackId) => {
       if (this.ctx.state() === SessionState.CLOSED) return;
-      const released = this.registry.release(id);
-      if (released) this.ctx.diagnostic.maybe("callback:release")?.({ id, reason: "gc" });
+      const released = this.registry.release(cbid);
+      if (released) this.ctx.diagnostic.maybe("callback:release")?.({ cbid, reason: "gc" });
     });
 
     this.remoteFinalization = new FinalizationRegistry<CallbackId>((id: CallbackId) => {
@@ -90,9 +88,9 @@ export class CallbackBridge {
 
   // --------- PUBLIC: SUBSTITUTION & RESTORATION --------- //
 
-  /** Walk a value graph, replacing functions with stubs registered under `ref`. */
-  substitute<T>(value: T, ref?: CorrelationId): T {
-    return this.registry.substitute(value, ref);
+  /** Walk a value graph, replacing functions with stubs registered under. */
+  substitute<T>(value: T, cid?: CorrelationId): T {
+    return this.registry.substitute(value, cid);
   }
 
   /**
@@ -100,19 +98,19 @@ export class CallbackBridge {
    * found anywhere in the graph with a live async function that sends `CBK:INVOKE`
    * and awaits `CBK:RETURN`.
    *
-   * `CALL`-scoped stub ids are tracked in `#remote_stubs[ref]` for bulk `CBK:RELEASE`
+   * `CALL`-scoped stub ids are tracked in `#remote_stubs[cid]` for bulk `CBK:RELEASE`
    * once the owning request completes; `SESSION`-scoped stubs survive the request.
    *
    * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
    * Cycles are short-circuited via the `seen` map.
    */
-  restoreStubs<T>(value: T, ref: CorrelationId | null = null): T {
+  restoreStubs<T>(value: T, cid: CorrelationId | null = null): T {
     const track = (stub: CallbackStub): CallbackId => {
-      if (ref === null || stub.scope === CallbackScope.SESSION) return stub.id;
-      let set = this.#remote_stubs.get(ref);
+      if (cid === null || stub.scope === CallbackScope.SESSION) return stub.id;
+      let set = this.#remote_stubs.get(cid);
       if (!set) {
         set = new Set();
-        this.#remote_stubs.set(ref, set);
+        this.#remote_stubs.set(cid, set);
       }
       set.add(stub.id);
       return stub.id;
@@ -121,7 +119,7 @@ export class CallbackBridge {
     const seen = new WeakMap<object, unknown>();
     const walk = (val: unknown): unknown => {
       if (isCallbackStub(val)) {
-        return this.#makeRemoteCallback(track(val), ref, val.scope);
+        return this.#makeRemoteCallback(track(val), cid, val.scope);
       }
       if (val === null || typeof val !== "object") return val;
 
@@ -158,7 +156,7 @@ export class CallbackBridge {
     const callback = this.registry.bind(fn);
     const release = (): boolean => {
       const ok = this.registry.release(callback.id);
-      if (ok) this.ctx.diagnostic.maybe("callback:release")?.({ id: callback.id, reason: "explicit" });
+      if (ok) this.ctx.diagnostic.maybe("callback:release")?.({ cbid: callback.id, reason: "explicit" });
       this.localFinalization.unregister(callback);
       return ok;
     };
@@ -191,13 +189,13 @@ export class CallbackBridge {
   }
 
   async #handleInvoke(packet: Packets.CallbackInvokePacket): Promise<void> {
-    const { ref, eid, callback, args } = packet.payload;
+    const { ref, eid, callback: cbid, args } = packet.payload;
     if (ref) this.invocations.enter(ref);
 
-    const fn = this.registry.get(callback);
-    const context = { correlationId: ref ?? undefined };
+    const fn = this.registry.get(cbid);
+    const context = { cid: ref ?? undefined };
 
-    this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, id: callback, ref });
+    this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, cbid, ref });
 
     const startedAt = Date.now();
     try {
@@ -209,7 +207,7 @@ export class CallbackBridge {
           payload: {
             ref,
             eid,
-            callback,
+            callback: cbid,
             status: WireStatus.NOT_FOUND,
             error: toWireError(
               new QuiryError(WireStatus.NOT_FOUND, "Callback not found. Did you release it?", context),
@@ -230,7 +228,7 @@ export class CallbackBridge {
       await this.ctx.send<Packets.CallbackReturnPacket>({
         kind: WireKind.CALLBACK,
         type: Packets.CallbackMessageType.RETURN,
-        payload: { ref, eid, callback, status: WireStatus.OK, result },
+        payload: { ref, eid, callback: cbid, status: WireStatus.OK, result },
       });
 
       this.ctx.diagnostic.maybe("callback:return")?.({
@@ -249,7 +247,7 @@ export class CallbackBridge {
           payload: {
             ref,
             eid,
-            callback,
+            callback: cbid,
             status: error.code as Exclude<WireStatus, typeof WireStatus.OK>,
             error: toWireError(error),
           },
@@ -294,12 +292,12 @@ export class CallbackBridge {
   #handleRelease(packet: Packets.CallbackReleasePacket): void {
     const { gc, callbacks } = packet.payload;
     const reason = gc ? "remote-gc" : "remote";
-    for (const id of callbacks) {
+    for (const cbid of callbacks) {
       // Missing callback on release is idempotent and expected —
       // e.g. we released it locally first. Observable-only.
-      const released = this.registry.release(id);
+      const released = this.registry.release(cbid);
       if (released) {
-        this.ctx.diagnostic.maybe("callback:release")?.({ id, reason });
+        this.ctx.diagnostic.maybe("callback:release")?.({ cbid, reason });
       }
     }
   }
@@ -311,17 +309,17 @@ export class CallbackBridge {
    * for every CALL-scoped stub the local side received under that request.
    * Called by the inbound request handler after the request settles.
    */
-  async releaseRemoteStubs(ref: CorrelationId): Promise<void> {
-    await this.#drainInflightInvocations(ref);
+  async releaseRemoteStubs(cid: CorrelationId): Promise<void> {
+    await this.#drainInflightInvocations(cid);
 
-    const stubs = this.#remote_stubs.get(ref);
-    this.#remote_stubs.delete(ref);
+    const stubs = this.#remote_stubs.get(cid);
+    this.#remote_stubs.delete(cid);
     if (!stubs || stubs.size === 0) return;
 
     await this.ctx.send<Packets.CallbackReleasePacket>({
       kind: WireKind.CALLBACK,
       type: Packets.CallbackMessageType.RELEASE,
-      payload: { ref, callbacks: Array.from(stubs) },
+      payload: { ref: cid, callbacks: Array.from(stubs) },
     });
   }
 
@@ -333,8 +331,8 @@ export class CallbackBridge {
     const released = this.registry.releaseSessionScoped();
     if (released.length === 0) return;
 
-    for (const id of released) {
-      this.ctx.diagnostic.maybe("callback:release")?.({ id, reason: "scope" });
+    for (const cbid of released) {
+      this.ctx.diagnostic.maybe("callback:release")?.({ cbid, reason: "scope" });
     }
 
     // Callbacks are local; no need to notify peer.
@@ -391,15 +389,15 @@ export class CallbackBridge {
    * unbounded (long-lived event handlers are the whole point).
    */
   #makeRemoteCallback(
-    id: CallbackId,
-    ref: CorrelationId | null,
+    cbid: CallbackId,
+    cid: CorrelationId | null,
     scope: CallbackScope,
   ): RemoteCallback<(...args: unknown[]) => Promise<unknown>> {
     const handle = (...args: unknown[]): Promise<unknown> => {
-      const eid = `${id}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
+      const eid = `${cbid}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
       const promise = new Promise<unknown>((resolve, reject) => {
         this.#pending_invocations.set(eid, {
-          ref,
+          ref: cid,
           timestamp: Date.now(),
           resolve: (value: unknown) => {
             resolve(value);
@@ -410,14 +408,14 @@ export class CallbackBridge {
         } satisfies PendingCallbackInvocation);
 
         this.outbound.enter();
-        if (ref) this.invocations.enter(ref);
-        this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, id, ref });
+        if (cid) this.invocations.enter(cid);
+        this.ctx.diagnostic.maybe("callback:invoke")?.({ eid, cbid, ref: cid });
 
         void this.ctx
           .send<Packets.CallbackInvokePacket>({
             kind: WireKind.CALLBACK,
             type: Packets.CallbackMessageType.INVOKE,
-            payload: { ref, eid, callback: id, args },
+            payload: { ref: cid, eid, callback: cbid, args },
           })
           .catch((error: unknown) => {
             const pending = this.#pending_invocations.get(eid);
@@ -425,11 +423,11 @@ export class CallbackBridge {
 
             this.#pending_invocations.delete(eid);
             this.outbound.exit();
-            if (ref) this.invocations.exit(ref);
+            if (cid) this.invocations.exit(cid);
 
             reject(
               new QuiryError(WireStatus.DATA_LOSS, "Failed to send callback invocation", {
-                correlationId: ref ?? undefined,
+                cid: cid ?? undefined,
                 cause: error,
               }),
             );
@@ -450,31 +448,31 @@ export class CallbackBridge {
         .send<Packets.CallbackReleasePacket>({
           kind: WireKind.CALLBACK,
           type: Packets.CallbackMessageType.RELEASE,
-          payload: { ref, callbacks: [id], gc: false },
+          payload: { ref: cid, callbacks: [cbid], gc: false },
         })
         .catch(() => {});
     };
 
     // Add debug symbols to the handle.
     Object.defineProperties(handle, {
-      [QuirySymbol.identifier]: { value: id, enumerable: false, writable: false },
+      [QuirySymbol.identifier]: { value: cbid, enumerable: false, writable: false },
       [QuirySymbol.release]: { value: release, enumerable: false },
     });
 
-    if (ref === null) this.remoteFinalization.register(handle, id);
+    if (cid === null) this.remoteFinalization.register(handle, cbid);
     return handle as unknown as RemoteCallback<typeof handle>;
   }
 
   /**
-   * Awaits all in-flight CBK:INVOKE work under `ref` — both inbound INVOKEs
+   * Awaits all in-flight CBK:INVOKE work under `cid` — both inbound INVOKEs
    * we're servicing and outbound INVOKEs awaiting RETURN.
    */
-  async #drainInflightInvocations(ref: CorrelationId): Promise<void> {
-    if (this.invocations.active(ref) === 0) return;
+  async #drainInflightInvocations(cid: CorrelationId): Promise<void> {
+    if (this.invocations.active(cid) === 0) return;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      this.invocations.idle(ref),
+      this.invocations.idle(cid),
       new Promise<void>((resolve) => {
         timer = setTimeout(() => resolve(), INFLIGHT_DRAIN_TIMEOUT);
       }),

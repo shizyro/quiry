@@ -7,7 +7,7 @@
 import { inspect } from "node:util";
 
 import { WireStatus, type WireError } from "./wire";
-import type { CorrelationId, TraceId } from "./types";
+import type { CorrelationId } from "./types";
 import { isSerializable } from "../lib/helpers";
 
 export type NonOkWireStatus = Exclude<WireStatus, typeof WireStatus.OK>;
@@ -18,9 +18,7 @@ export interface TraceableErrorOptions {
   /** Native cause chain; preserved locally, serialized at the wire boundary. */
   readonly cause?: unknown;
   /** The request this error belongs to, if applicable. */
-  readonly correlationId?: CorrelationId;
-  /** End-to-end trace identifier propagated via `RequestControl.trace`. */
-  readonly traceId?: TraceId;
+  readonly cid?: CorrelationId;
   /** Override the original stack (used when reconstructing from wire). */
   readonly stack?: string;
 }
@@ -34,10 +32,7 @@ export const MAX_CAUSE_DEPTH = 3;
  */
 export class QuiryError extends Error {
   readonly code: WireStatus;
-
-  readonly correlationId?: CorrelationId;
-  readonly traceId?: TraceId;
-
+  readonly cid?: CorrelationId;
   readonly detail?: Record<string, unknown>;
   override readonly cause?: unknown;
 
@@ -46,8 +41,7 @@ export class QuiryError extends Error {
 
     this.name = "QuiryError";
     this.code = code;
-    this.correlationId = opts.correlationId;
-    this.traceId = opts.traceId;
+    this.cid = opts.cid;
     this.detail = opts.detail;
     this.cause = opts.cause;
 
@@ -69,18 +63,14 @@ export class QuiryError extends Error {
    * but the native error is **not** re-attached as its own cause. That avoids a phantom chain
    * of identical wrapper/wrappee pairs that serialize into noisy nested payloads.
    */
-  static from(
-    error: unknown,
-    ctx: Pick<TraceableErrorOptions, "correlationId" | "traceId"> = {},
-  ): QuiryError {
+  static from(error: unknown, ctx: Pick<TraceableErrorOptions, "cid"> = {}): QuiryError {
     if (error instanceof QuiryError) {
       // Only augment context; do not rewrap.
-      if (ctx.correlationId && !error.correlationId) {
+      if (ctx.cid && !error.cid) {
         return new QuiryError(error.code, error.message, {
           detail: error.detail,
           cause: error.cause,
-          correlationId: ctx.correlationId,
-          traceId: error.traceId ?? ctx.traceId,
+          cid: ctx.cid,
           stack: error.stack,
         });
       }
@@ -108,8 +98,7 @@ export class QuiryError extends Error {
    */
   [inspect.custom](_depth: number, _opts: unknown, _inspectFn: typeof inspect): string {
     const meta: string[] = [`code=${WireStatus[this.code] ?? this.code}`];
-    if (this.correlationId) meta.push(`ref=${this.correlationId}`);
-    if (this.traceId) meta.push(`trace=${this.traceId}`);
+    if (this.cid) meta.push(`ref=${this.cid}`);
 
     const header = `\u001b[91m${this.name}: ${this.message} [${meta.join(", ")}]\u001b[39m`;
     const stack = this.stack?.split("\n").slice(1).join("\n") ?? "";
@@ -146,16 +135,12 @@ function describe(cause: unknown): string {
  *
  * Non-serializable values in `detail` are dropped so the result is always structured-clone-safe.
  */
-export function toWireError(
-  error: unknown,
-  ctx: Pick<TraceableErrorOptions, "correlationId" | "traceId"> = {},
-): WireError {
+export function toWireError(error: unknown, ctx: Pick<TraceableErrorOptions, "cid"> = {}): WireError {
   const build = (err: QuiryError, depth: number): WireError => {
     const details = {
       status: (err.code === WireStatus.OK ? WireStatus.INTERNAL : err.code) as NonOkWireStatus,
       message: err.message,
-      correlationId: err.correlationId,
-      traceId: err.traceId,
+      cid: err.cid,
       detail: err.detail ? sanitize(err.detail) : undefined,
       stack: err.stack,
       cause: undefined,
@@ -202,8 +187,7 @@ export function fromWireError(error: WireError): QuiryError {
     : undefined;
 
   return new QuiryError(error.status, error.message, {
-    correlationId: error.correlationId,
-    traceId: error.traceId,
+    cid: error.cid,
     detail: error.detail,
     cause,
     stack,

@@ -1,6 +1,6 @@
 import * as Packets from "../../../protocol/packets";
 import { WireKind, WireStatus } from "../../../protocol/wire";
-import type { CorrelationId, TraceId } from "../../../protocol/types";
+import type { CorrelationId } from "../../../protocol/types";
 
 import { InFlightTracker } from "../../../lib/tracker";
 
@@ -84,10 +84,7 @@ export class InboundRequests {
 
     return this.tracker.run(async () => {
       const startedAt = Date.now();
-      const context = {
-        correlationId: packet.id,
-        traceId: packet.metadata?.traceId as TraceId | undefined,
-      };
+      const context = { cid: packet.id };
       const reqKind: "set" | "get" | "call" =
         packet.type === Packets.RequestMessageType.SET
           ? "set"
@@ -176,8 +173,9 @@ export class InboundRequests {
               return;
             }
 
-            result = await abortable(Promise.resolve(value), controller?.signal)
-              .finally(() => controller && this.controllers.delete(packet.id));
+            result = await abortable(Promise.resolve(value), controller?.signal).finally(
+              () => controller && this.controllers.delete(packet.id),
+            );
 
             break;
           }
@@ -276,7 +274,7 @@ export class InboundRequests {
    * consumer has granted credit, preventing unbounded memory accumulation on a slow consumer.
    */
   async #streamOutboundResponse(
-    ref: CorrelationId,
+    cid: CorrelationId,
     iterable: IterableIterator<unknown> | AsyncIterableIterator<unknown>,
   ): Promise<void> {
     const stream: OutboundStream = {
@@ -286,7 +284,7 @@ export class InboundRequests {
       iterator: iterable,
       timestamp: Date.now(),
     };
-    this.#outbound_streams.set(ref, stream);
+    this.#outbound_streams.set(cid, stream);
 
     let seq = 0;
     try {
@@ -309,7 +307,7 @@ export class InboundRequests {
         const chunk = result.value;
         if (!isSerializable(chunk)) {
           throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Stream chunk is not serializable", {
-            correlationId: ref,
+            cid,
             detail: { seq },
           });
         }
@@ -318,9 +316,9 @@ export class InboundRequests {
         await this.ctx.send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
           type: Packets.ResponseMessageType.STREAM,
-          payload: { event: "chunk", ref, seq, chunk },
+          payload: { event: "chunk", ref: cid, seq, chunk },
         });
-        this.ctx.diagnostic.maybe("stream:chunk")?.({ ref, seq, direction: "sent" });
+        this.ctx.diagnostic.maybe("stream:chunk")?.({ ref: cid, seq, direction: "sent" });
 
         seq++;
       }
@@ -329,29 +327,29 @@ export class InboundRequests {
       await this.ctx.send<Packets.StreamResponsePacket>({
         kind: WireKind.RESPONSE,
         type: Packets.ResponseMessageType.STREAM,
-        payload: { event: "end", ref, seq },
+        payload: { event: "end", ref: cid, seq },
       });
 
-      this.ctx.diagnostic.maybe("stream:end")?.({ ref, seq, direction: "sent" });
+      this.ctx.diagnostic.maybe("stream:end")?.({ ref: cid, seq, direction: "sent" });
     } catch (cause: unknown) {
       if (stream.cancelled) return;
-      const error = QuiryError.from(cause, { correlationId: ref });
+      const error = QuiryError.from(cause, { cid });
       await this.ctx
         .send<Packets.StreamResponsePacket>({
           kind: WireKind.RESPONSE,
           type: Packets.ResponseMessageType.STREAM,
           payload: {
             event: "error",
-            ref,
+            ref: cid,
             seq,
-            error: toWireError(error, { correlationId: ref }),
+            error: toWireError(error, { cid }),
           },
         })
         .catch(() => null);
 
-      this.ctx.diagnostic.maybe("stream:error")?.({ ref, seq, status: error.code });
+      this.ctx.diagnostic.maybe("stream:error")?.({ ref: cid, seq, status: error.code });
     } finally {
-      this.#outbound_streams.delete(ref);
+      this.#outbound_streams.delete(cid);
       // Best-effort close the source iterator on any exit path — errors,
       // normal completion, or cancellation. `return()` is idempotent and
       // safe to call on a drained generator.
@@ -369,15 +367,15 @@ export class InboundRequests {
     if (stream.cancelled) return;
     stream.cancelled = true;
 
-    // Find the ref for diagnostic emit.
-    let ref: CorrelationId | undefined;
+    // Find the correlation ID for diagnostic emit.
+    let cid: CorrelationId | undefined;
     for (const [k, v] of this.#outbound_streams) {
       if (v === stream) {
-        ref = k;
+        cid = k;
         break;
       }
     }
-    if (ref) this.ctx.diagnostic.maybe("stream:cancel")?.({ ref, source });
+    if (cid) this.ctx.diagnostic.maybe("stream:cancel")?.({ ref: cid, source });
 
     // Release any credit waiter so the streaming loop can exit.
     const waiter = stream.waiter;
