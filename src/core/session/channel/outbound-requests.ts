@@ -238,9 +238,9 @@ export class OutboundRequests {
       });
 
       if (signal) {
-        abortHandler = () => {
+        abortHandler = async () => {
           this.ctx.diagnostic.maybe("request:abort")?.({ ref: cid });
-          void this.ctx
+          await this.ctx
             .send<Packets.AbortRequestPacket>({
               kind: WireKind.REQUEST,
               type: Packets.RequestMessageType.ABORT,
@@ -333,7 +333,7 @@ export class OutboundRequests {
         signal!.removeEventListener("abort", abortHandler);
       };
       if (signal.aborted) abortHandler();
-      signal.addEventListener("abort", abortHandler, { once: true });
+      signal.addEventListener("abort", abortHandler);
     }
 
     this.#pending.set(cid, entry);
@@ -360,7 +360,6 @@ export class OutboundRequests {
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
           payload: { object, method, args: substitutes },
-          metadata: signal !== undefined ? { controlled: true } : undefined,
         });
 
         await this.ctx.send<Packets.StreamResponsePacket>({

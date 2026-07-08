@@ -6,7 +6,6 @@ import { InFlightTracker } from "../../../lib/tracker";
 
 import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
-import { abortable } from "../../../lib/utils";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
@@ -28,6 +27,15 @@ interface OutboundStream<T = unknown> {
 }
 
 /**
+ * Represents a pending operation on an inbound request. Used to track
+ * and potentially reject pending operations.
+ */
+interface PendingOperation {
+  reject(error: Error): void;
+  // ...
+}
+
+/**
  * Producer-side request servicing: dispatches inbound REQUEST packets to
  * the {@link InquiryFunc}, owns the per-request abort controllers, and
  * runs the producer-side stream loop with credit-based flow control.
@@ -38,9 +46,9 @@ interface OutboundStream<T = unknown> {
  */
 export class InboundRequests {
   private readonly tracker = new InFlightTracker();
-  private readonly controllers = new Map<CorrelationId, AbortController>();
 
   readonly #outbound_streams = new Map<CorrelationId, OutboundStream>();
+  readonly #pending_operations = new Map<CorrelationId, PendingOperation>();
 
   constructor(
     private readonly ctx: SessionContext,
@@ -56,7 +64,9 @@ export class InboundRequests {
    */
   handleRequestPacket(packet: Packets.AnyRequestPacket) {
     if (packet.type === Packets.RequestMessageType.ABORT) {
-      this.controllers.get(packet.payload.ref)?.abort();
+      this.#pending_operations
+        .get(packet.payload.ref)
+        ?.reject(new QuiryError(WireStatus.ABORTED, "Operation was aborted"));
       this.ctx.diagnostic.maybe("inquiry:received")?.({
         ref: packet.id,
         object: "",
@@ -129,12 +139,6 @@ export class InboundRequests {
         property: "method" in packet.payload ? packet.payload.method : packet.payload.property,
       };
 
-      let controller: AbortController | undefined;
-      if ("control" in packet.payload && packet.metadata?.controlled === true) {
-        controller = new AbortController();
-        this.controllers.set(packet.id, controller);
-      }
-
       try {
         const descriptor = this.inquiry(request);
         let result: unknown;
@@ -173,9 +177,12 @@ export class InboundRequests {
               return;
             }
 
-            result = await abortable(Promise.resolve(value), controller?.signal).finally(
-              () => controller && this.controllers.delete(packet.id),
-            );
+            const operation = rejectable(Promise.resolve(value));
+            const pending: PendingOperation = {
+              reject: operation.reject,
+            };
+            this.#pending_operations.set(packet.id, pending);
+            result = await operation.promise.finally(() => this.#pending_operations.delete(packet.id));
 
             break;
           }
@@ -257,8 +264,10 @@ export class InboundRequests {
   /** Force-reset for teardown. Existing in-flight `tracker.run` exits will underflow. */
   drain(): void {
     this.tracker.drain();
-    this.controllers.clear();
+
+    // No need to go through; tracker already finalized.
     this.#outbound_streams.clear();
+    this.#pending_operations.clear();
   }
 
   // --------- PUBLIC: INTROSPECTION --------- //
@@ -390,4 +399,10 @@ export class InboundRequests {
       });
     }
   }
+}
+
+function rejectable<T>(innver: Promise<T>) {
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  innver.then(resolve, reject);
+  return { promise, reject };
 }
