@@ -6,14 +6,13 @@ An implementation of a transparent, type-safe IPC for worker threads and child p
 $ npm install --save quiry
 ```
 
-![Preview](https://github.com/user-attachments/assets/d4177274-e1c3-4f67-a50b-2de3e18c752c)
+![Preview](https://github.com/user-attachments/assets/551f6db6-d1df-4b56-a1da-f01ec25b66a9)
 
 ---
 
 You expose an object on one side, and use it from the other side as if it were local. Methods, properties, and even generators carry across the boundary.
 
-If it looks like a function, you call it. If it looks like a value, you read it.
-
+If it looks like a function, you call it. If it looks like a value, you read it — or assign to it, and the write travels across the same way.
 
 ## Basic Usage
 
@@ -43,7 +42,7 @@ Quiry.expose("math", new MathService());
 
 export type RemoteRegistry = {
   math: MathService;
-}
+};
 ```
 
 ```typescript
@@ -59,10 +58,10 @@ const peer = Quiry.attach<RemoteRegistry>(transport);
 // now, you can access remote objects from that transport
 const math = peer.remote("math"); // Remote<MathService>
 
-console.log(await math.version); // 1.0.0
-console.log(await math.add(1, 2)); // 3
+console.log(await math.version); // -> 1.0.0
+console.log(await math.add(1, 2)); // -> 3
 for await (const n of math.count(1, 3)) {
-  console.log(n); // 1, 2, 3
+  console.log(n); // -> 1, 2, 3
 }
 ```
 
@@ -70,7 +69,7 @@ The proxy returned by `peer.remote(...)` has the exact shape of the original int
 
 ```typescript
 const peer = Quiry.attach<Registry>(...);
-peer.remote("foo"); // inferred from Registry
+peer.remote("foo"); // Remote<Registry["foo"]> [inferred]
 peer.remote<FooService>("foo"); // Remote<FooService> [type override]
 ```
 
@@ -78,11 +77,10 @@ Note there is `Quiry.fork()` and `Quiry.spawn()`, which are convenience methods 
 
 ```typescript
 const worker = new Worker("worker.ts");
-Quiry.attach(new WorkerThreadsTransport({ worker }));
+Quiry.attach(new WorkerThreadsTransport(worker));
 ```
 
 For a more detailed showcase, make sure to check this [basic example](https://github.com/shizyro/quiry/tree/main/examples/basic);
-
 
 ## Streaming
 
@@ -106,7 +104,6 @@ If the callsite feels natural, it should do what's expected.
 
 > Quiry uses a [credit-based flow control](https://oneflow2020.medium.com/the-history-of-credit-based-flow-control-part-1-342ec6efe23c) to solve backpressure; a fast producer shouldn't outpace a slow consumer indefinitely, growing the message queue until something gives.
 
-
 ## Callbacks
 
 Functions don't survive structured cloning, but we can't pretend they don't exist; half of what we do with event emitters, request handlers, or progress reporters need functions as arguments. Workarounds are painful to deal with.
@@ -114,13 +111,12 @@ Functions don't survive structured cloning, but we can't pretend they don't exis
 If your method accepts a callback, the caller should be able to pass one.
 
 ```typescript
-await peer.remote<TimerService>("timer")
-  .every(1000, (tick) => console.log("tick", tick));
+await peer.remote<TimerService>("timer").every(1000, () => { ... });
 ```
 
 Quiry replaces functional arguments with lightweight serializable stubs, and sends them across. On the receiving end, that stub is rebuilt into a real async function that, when called, fires an invocation to the original reference across the wire, and returns the result.
 
-However, with that, the garbage collector cannot decide on functions with no actual local [references](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Memory_management#references). And so, **callback lifetimes are explicit**. You can either pass functions inline, making them tied to the call — when the call settles, they're released automatically with no cleanup required, or, wrap that function in a **callback proxy**.  
+However, with that, the garbage collector cannot decide on functions with no actual local [references](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Memory_management#references). And so, **callback lifetimes are explicit**. You can either pass functions inline, making them tied to the call — when the call settles, they're released automatically with no cleanup required, or, wrap that function in a **callback proxy**.
 
 Callback proxies are session-scoped, outliving a single provocation. They are released explicitly with `[Quiry.release]()`, or when the wrapper goes out of scope under [TC39 explicit resource management](https://github.com/tc39/proposal-explicit-resource-management). If your runtime supports [WeakRefs](https://github.com/tc39/proposal-weakrefs), the callback proxy will be released automatically at remote side when its garbage collected.
 
@@ -140,7 +136,7 @@ await peer.remote<StreamService>("stream").subscribe("updates", handle);
 // [the callback is automatically released when the scope exits]
 ```
 
-Callbacks are always asynchronous from the remote caller’s perspective because invoking them requires an IPC round trip. Design remote methods so callback parameters may return promises.
+Callbacks are **always asynchronous from the remote caller's perspective** because invoking them requires an IPC round trip. Design remote methods so callback parameters may return promises.
 
 ### Returned Function Stubs
 
@@ -163,6 +159,41 @@ await off();
 
 These returned function stubs are session-scoped on the caller side. They live for as long as the caller holds a reference, and are automatically released from remote side once the stub is **no longer referenced**, and it is reclaimed by GC. This is also done through Javascript's [FinalizationRegistry](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry), which allows to eventually notify the remote peer after the local stub is collected.
 
+## Request Control
+
+Remote calls can be slow, or simply outlive the caller's interest. An `AbortSignal` doesn't cross the boundary on its own — signals aren't serializable, and neither is intent by itself. Quiry threads control through the same proxy call, via a symbol rather than an extra parameter that would clutter your call signature:
+
+```typescript
+await proxy.method[Quiry.control](signal)(...args);
+```
+
+That's the general shape. Cancellation surfaces as its own status, rather than a generic rejection.
+
+```typescript
+const signal = AbortSignal.timeout(5000);
+await peer
+  .remote<FileService>("file")
+  .open[Quiry.control](signal)("data.txt")
+  .catch((error) => {
+    if (error instanceof QuiryError && error.code === Quiry.WireStatus.ABORTED) {
+      console.log("Call aborted; timed out");
+      return;
+    }
+
+    throw error; // rethrow any other error
+  });
+```
+
+Aborting rejects the call locally and tells the peer to stop working on it. On the exposed side, `Quiry.signal()` returns the ambient signal, via [asynchronous context tracking](https://nodejs.org/api/async_context.html#asynchronous-context-tracking), for the call currently executing, so long-running methods can cooperate instead of running to completion regardless:
+
+```typescript
+async function longRunningTask() {
+  const signal = Quiry.signal();
+  while (!signal?.aborted) { ... }
+}
+```
+
+Streams honor the same signal for their entire lifetime, not just the initial request.
 
 ## Limitations
 
@@ -176,13 +207,14 @@ Some values are intentionally limited or not supported yet:
 - methods returning `this` are not useful across the boundary
 - non-serializable values do not work unless provided a specific proxy mechanism for them
 - functions are supported through callback proxies and returned function stubs, not through structured cloning itself
+- streaming only flows one way — a returned generator becomes a stream, a generator passed as an argument does not
 
 Transferables objects are supported and are collected automatically from requests. While the structured clone algorithm accepts `SharedArrayBuffer` objects, shared memory is only accessible to worker threads; child processes operate in entirely isolated memory spaces.
-
 
 ## Status
 
 Single-author project, pre-1.0. The internal protocol shape is mostly stable, but the public API surface still has open decisions and may change before a stable release.
+
 > This project is under active development. Many edge cases have not been tested. If you encounter any issues, please [open an issue](https://github.com/shizyro/quiry/issues).
 
 All contents of this repository and its history are licensed under Apache License 2.0.
