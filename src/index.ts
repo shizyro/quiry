@@ -35,6 +35,7 @@ import {
 
 import { fetchDescriptor } from "./lib/helpers";
 import { randomBytes } from "node:crypto";
+import { contextStorage } from "./lib/call-context";
 
 const registry = new Map<string, RemoteImpl>();
 const peers = new Map<PeerIdentifier, PeerConnection>();
@@ -193,6 +194,16 @@ export function has(name: string): boolean {
 /** Remove every remote object registration. Peer connections are not affected. */
 export function clear(): void {
   registry.clear();
+}
+
+// --------- PUBLIC API: UTILITY --------- //
+
+/**
+ * Returns the abort signal tied to the remote call currently executing on
+ * this async continuation, or `undefined` if called outside of one.
+ */
+export function signal(): AbortSignal | undefined {
+  return contextStorage.getStore()?.signal;
 }
 
 // --------- INTERNAL --------- //

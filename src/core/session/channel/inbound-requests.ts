@@ -3,6 +3,7 @@ import { WireKind, WireStatus } from "../../../protocol/wire";
 import type { CorrelationId } from "../../../protocol/types";
 
 import { InFlightTracker } from "../../../lib/tracker";
+import { contextStorage } from "../../../lib/call-context";
 
 import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
@@ -28,11 +29,10 @@ interface OutboundStream<T = unknown> {
 
 /**
  * Represents a pending operation on an inbound request. Used to track
- * and potentially reject pending operations.
+ * and potentially control pending operations.
  */
 interface PendingOperation {
-  reject(error: Error): void;
-  // ...
+  controller: AbortController;
 }
 
 /**
@@ -64,9 +64,7 @@ export class InboundRequests {
    */
   handleRequestPacket(packet: Packets.AnyRequestPacket) {
     if (packet.type === Packets.RequestMessageType.ABORT) {
-      this.#pending_operations
-        .get(packet.payload.ref)
-        ?.reject(new QuiryError(WireStatus.ABORTED, "Operation was aborted"));
+      this.#pending_operations.get(packet.payload.ref)?.controller.abort();
       this.ctx.diagnostic.maybe("inquiry:received")?.({
         ref: packet.id,
         object: "",
@@ -162,10 +160,15 @@ export class InboundRequests {
               );
             }
 
-            const value = (prop as (...args: unknown[]) => unknown)(
-              ...("args" in packet.payload
-                ? this.ctx.callbacks.restoreStubs(packet.payload.args, packet.id)
-                : []),
+            const controller = new AbortController();
+            this.#pending_operations.set(packet.id, { controller });
+
+            const value = contextStorage.run({ signal: controller.signal }, () =>
+              (prop as (...args: unknown[]) => unknown)(
+                ...("args" in packet.payload
+                  ? this.ctx.callbacks.restoreStubs(packet.payload.args, packet.id)
+                  : []),
+              ),
             );
 
             if (isAnyIterableIterator(value)) {
@@ -173,16 +176,14 @@ export class InboundRequests {
               // check: async iterators have a non-plain prototype and would
               // otherwise be rejected as non-serializable.
               await this.#streamOutboundResponse(packet.id, value);
+              this.#pending_operations.delete(packet.id);
               settled(WireStatus.OK);
               return;
             }
 
-            const operation = rejectable(Promise.resolve(value));
-            const pending: PendingOperation = {
-              reject: operation.reject,
-            };
-            this.#pending_operations.set(packet.id, pending);
-            result = await operation.promise.finally(() => this.#pending_operations.delete(packet.id));
+            result = await abortable(Promise.resolve(value), controller.signal).finally(() =>
+              this.#pending_operations.delete(packet.id),
+            );
 
             break;
           }
@@ -401,8 +402,19 @@ export class InboundRequests {
   }
 }
 
-function rejectable<T>(innver: Promise<T>) {
-  const { promise, resolve, reject } = Promise.withResolvers<T>();
-  innver.then(resolve, reject);
-  return { promise, reject };
+/** A wrapper around a promise that rejects with an abort signal. */
+export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new QuiryError(WireStatus.ABORTED, "Operation was aborted"));
+
+  return new Promise<T>((resolve, reject) => {
+    const abortHandler = () => reject(new QuiryError(WireStatus.ABORTED, "Operation was aborted"));
+    signal?.addEventListener("abort", abortHandler);
+
+    promise
+      .then(resolve)
+      .catch(reject)
+      .finally(() => {
+        signal?.removeEventListener("abort", abortHandler);
+      });
+  });
 }

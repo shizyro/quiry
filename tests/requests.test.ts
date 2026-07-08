@@ -2,6 +2,7 @@ import { WireStatus } from "~/protocol/wire";
 import { QuiryError } from "~/protocol/errors";
 
 import { openSessionPair, type SessionPair, type MockInquiryFunc } from "./helpers/session-pair";
+import { contextStorage } from "~/lib/call-context";
 
 /**
  * Request correlation, argument routing, error fidelity,
@@ -216,5 +217,26 @@ describe("Session requests", () => {
     expect(producerSeen).not.toHaveBeenCalled();
 
     await drain.catch(() => {});
+  });
+
+  it("exposes an ambient abort signal that fires when the caller aborts", async () => {
+    let observed: AbortSignal | undefined;
+    pair = openSessionPair({
+      producerInquiry: () => ({
+        value: () =>
+          new Promise((resolve) => {
+            observed = contextStorage.getStore()?.signal;
+            observed?.addEventListener("abort", () => resolve("stopped"), { once: true });
+          }),
+      }),
+    });
+
+    const ac = new AbortController();
+    const promise = pair.consumer.request("svc", "_", [], ac.signal);
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+
+    await expect(promise).rejects.toMatchObject({ code: WireStatus.ABORTED });
+    expect(observed?.aborted).toBe(true);
   });
 });
