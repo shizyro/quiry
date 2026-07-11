@@ -10,10 +10,10 @@ import { randomUUID } from "node:crypto";
  * Intentionally a string literal to allow for exchange with the remote
  * side. Though, I don't know if there is a better way to do this.
  */
-const stub = "quiry.callback.stub" as const;
+const CALLBACK_MARKER = "__quiry.callback" as const;
 
-export interface CallbackStub {
-  readonly [stub]: true;
+interface CallbackEnvelope {
+  readonly [CALLBACK_MARKER]: true;
   readonly id: CallbackId;
   readonly scope: CallbackScope;
 }
@@ -25,8 +25,8 @@ export enum CallbackScope {
   SESSION,
 }
 
-export function isCallbackStub(value: unknown): value is CallbackStub {
-  return typeof value === "object" && value !== null && stub in value;
+export function isCallbackEnvelope(value: unknown): value is CallbackEnvelope {
+  return typeof value === "object" && value !== null && CALLBACK_MARKER in value;
 }
 
 type CallbackEntry = {
@@ -41,6 +41,10 @@ type CallbackEntry = {
 export class CallbackRegistry {
   static genid(): CallbackId {
     return randomUUID() as CallbackId;
+  }
+
+  static envelope(id: CallbackId, scope: CallbackScope): CallbackEnvelope {
+    return { [CALLBACK_MARKER]: true, id, scope } satisfies CallbackEnvelope;
   }
 
   readonly #by_id = new Map<CallbackId, CallbackEntry>();
@@ -129,7 +133,7 @@ export class CallbackRegistry {
    *
    * Walks arrays and plain objects recursively; class instances and other non-plain
    * objects are returned as-is (they wouldn't survive structured cloning anyway).
-   * Already-substituted {@link CallbackStub} stubs pass through untouched. Cycles are
+   * Already-substituted {@link CallbackEnvelope} stubs pass through untouched. Cycles are
    * detected and short-circuited.
    */
   substitute<T>(value: T, cid?: CorrelationId): T {
@@ -140,11 +144,11 @@ export class CallbackRegistry {
       if (typeof block === "function") {
         // @ts-expect-error - `scope` is always `CallbackScope.CALL` or `CallbackScope.SESSION`
         const id = this.register(block, scope, cid);
-        return { [stub]: true, id, scope } satisfies CallbackStub;
+        return CallbackRegistry.envelope(id, scope);
       }
 
       if (block === null || typeof block !== "object") return block;
-      if (isCallbackStub(block)) return block;
+      if (isCallbackEnvelope(block)) return block;
 
       const cached = seen.get(block as object);
       if (cached !== undefined) return cached;
@@ -158,8 +162,8 @@ export class CallbackRegistry {
 
       if (isPlainObject(block)) {
         const result: Record<string, unknown> = {};
-        seen.set(block as object, result);
-        for (const [key, val] of Object.entries(block as object)) {
+        seen.set(block, result);
+        for (const [key, val] of Object.entries(block)) {
           result[key] = walk(val);
         }
         return result;
@@ -172,9 +176,9 @@ export class CallbackRegistry {
   }
 
   /** Registers a function as a `SESSION`-scoped callback and returns a callback handle. */
-  bind(fn: Function): CallbackStub {
+  bind(fn: Function): CallbackEnvelope {
     const id = this.register(fn, CallbackScope.SESSION);
-    return { [stub]: true, id, scope: CallbackScope.SESSION } satisfies CallbackStub;
+    return CallbackRegistry.envelope(id, CallbackScope.SESSION);
   }
 
   get size(): number {

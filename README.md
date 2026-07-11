@@ -111,7 +111,7 @@ Functions don't survive structured cloning, but we can't pretend they don't exis
 If your method accepts a callback, the caller should be able to pass one.
 
 ```typescript
-await peer.remote<TimerService>("timer").every(1000, () => { ... });
+await peer.remote<TimerService>("timer").delay(1000, () => { ... });
 ```
 
 Quiry replaces functional arguments with lightweight serializable stubs, and sends them across. On the receiving end, that stub is rebuilt into a real async function that, when called, fires an invocation to the original reference across the wire, and returns the result.
@@ -195,6 +195,46 @@ async function longRunningTask() {
 
 Streams honor the same signal for their entire lifetime, not just the initial request.
 
+## Custom Serialization
+
+Structured cloning works as expected for most data types, but, it only outputs plain data; class instances cross the boundary as a plain object with no related prototype chain.
+
+However, you can define custom serialization strategies for specific class instances and other complex data that would not work as they are.
+
+```typescript
+class Money {
+  constructor(
+    public readonly cents: number,
+    public readonly currency: string,
+  ) {}
+
+  // define custom serialization strategy
+  static readonly [Quiry.serialize] = {
+    serialize: (value: Money) => ({ cents: value.cents, currency: value.currency }),
+    deserialize: (data: { cents: number; currency: string }) => new Money(data.cents, data.currency),
+  };
+
+  static {
+    // announce and register the serializer
+    Quiry.registerSerializer(this, import.meta.url);
+  }
+}
+```
+
+Once registered, instances of that class crosses like any other value, and comes out at the other side as a constructed instance, not a shell of one.
+
+```typescript
+await peer.remote<WalletService>("wallet").charge(new Money(500, "USD"));
+```
+
+Registration happens when the class loads, so both sides need `Money` itself imported
+at runtime — a type-only import never runs the class body, and the peer won't know
+what to reconstruct.
+
+If your build renames classes during minification, or two classes would otherwise
+collide, pass an explicit `id` within the serializer body instead of relying
+on the derived one.
+
 ## Limitations
 
 Everything crossing a thread boundary goes through structured cloning. That comes with constraints worth knowing upfront.
@@ -203,7 +243,7 @@ Structured-cloneable data works as expected: primitives, arrays, plain objects, 
 
 Some values are intentionally limited or not supported yet:
 
-- class instances cross the boundary as data, not as live instances with their prototype chain intact
+- class instances cross the boundary as plain data by default — register a [custom serializer](#custom-serialization) to preserve them as live instances instead
 - methods returning `this` are not useful across the boundary
 - non-serializable values do not work unless provided a specific proxy mechanism for them
 - functions are supported through callback proxies and returned function stubs, not through structured cloning itself

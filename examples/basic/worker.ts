@@ -29,17 +29,19 @@ async function main() {
   }, 1000); // inline callbacks are released when the remote call settles
 
   const events = peer.remote("events");
-  log(`Event names: ${await events.eventNames}`); // remote getters
+  {
+    // long-lived callback - must be manually released with the `.release()` method,
+    // or be automatically disposed out of scope with the `using` (TC39) keyword.
+    const handle = peer.callback((query?: string) => {
+      log(`Scoped callback invoked with query: ${query}`);
+    });
 
-  // assigned long-lived callback - must be manually released with `.release()`,
-  // or be automatically disposed out of scope with the `using` (TC39) keyword.
-  using handle = peer.callback((query?: string) => {
-    log(`Scoped callback invoked with query: ${query}`);
-  });
+    await events.on("foo", handle);
+    log(`Event names: ${(await events.eventNames).join(", ")}`); // remote getters
 
-  // functional return stubs - automatically released from remote peer
-  // once they are garbage collected on this side (caller).
-  const unsubscribe = await events.on("foo", handle);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await events.emit("foo", "You shall pass!"); // <-
+  }
 
   const predicate = await peer.remote("math").threshold(50);
   const scores = [15, 42, 68, 91, 33];
@@ -48,14 +50,9 @@ async function main() {
   log(scores, "->", filtered);
 
   // ... also supports functions that are deeply nested in return values
-  const file = await peer.remote("file")
-    .open[Quiry.control](AbortSignal.timeout(5000))("data.txt"); // controlled remote calls
+  const file = await peer.remote("file").open[Quiry.control](AbortSignal.timeout(5000))("data.txt"); // controlled remote calls
   log("\n\t", await file.read(123));
   await file.close();
-
-  await new Promise((resolve) => setTimeout(resolve, 2000))
-    .then(() => events.emit("foo", "You shall pass!"))
-    .then(() => unsubscribe()); // OK.
 }
 
 void main();

@@ -1,13 +1,12 @@
 import { WireStatus } from "~/protocol/wire";
 import { openSessionPair, type SessionPair } from "./helpers/session-pair";
 
-import type { Callback } from "~/core/session";
+import type { CallbackProxy } from "~/core/session";
 import type { Remote } from "~/interface/transformers";
 
 import * as QuirySymbol from "~/core/symbols";
 
 import { runGCPressure } from "./helpers/garbage-collection";
-import type { RemoteCallback } from "~/core/session/channel/callback-bridge";
 
 /**
  * Tests for the Session's support of callback functions as
@@ -196,7 +195,7 @@ describe("Session callbacks", () => {
       }),
     });
 
-    const func = (await pair.consumer.request("svc", "_", [])) as RemoteCallback;
+    const func = (await pair.consumer.request("svc", "_", [])) as CallbackProxy;
     expect(typeof func).toBe("function");
     expect(func[QuirySymbol.identifier]).toBeDefined();
     expect(await func()).toBe("ok");
@@ -270,7 +269,7 @@ describe("Session callbacks", () => {
       });
 
       // Defined on consumer side.
-      let handle = pair.consumer.proxy(() => "ok") as RemoteCallback | null;
+      let handle = pair.consumer.proxy(() => "ok") as CallbackProxy | null;
       const cbId = String(handle![QuirySymbol.identifier]);
 
       await expect(pair.consumer.request("svc", "_", [handle])).resolves.toBe("ok");
@@ -296,7 +295,7 @@ describe("Session callbacks", () => {
         }),
       });
 
-      let handle = (await pair.consumer.request("svc", "_", [])) as Callback | null;
+      let handle = (await pair.consumer.request("svc", "_", [])) as CallbackProxy | null;
       const cbId = String(handle![QuirySymbol.identifier]);
 
       expect(await handle!()).toBe("ok");

@@ -25,11 +25,11 @@ import type { SessionContext } from "./context";
 import type { InquiryFunc, InquiryRequest, InquiryDescriptor } from "./inquiry";
 
 export { SessionState };
-export type { Callback, InquiryDescriptor, InquiryFunc, InquiryRequest };
+export type { CallbackProxy, InquiryDescriptor, InquiryFunc, InquiryRequest };
 
 import { InboundRequests } from "./channel/inbound-requests";
 import { OutboundRequests } from "./channel/outbound-requests";
-import { CallbackBridge, type Callback } from "./channel/callback-bridge";
+import { CallbackBridge, type CallbackProxy } from "./channel/callback-bridge";
 import { DrainCoordinator } from "./channel/drain-coordinator";
 
 import { randomBytes } from "node:crypto";
@@ -183,7 +183,7 @@ export class Session {
   }
 
   /** Proxies a function to the session and returns a callback handle. */
-  proxy<T extends Function>(fn: T): Callback<T> {
+  proxy<T extends Function>(fn: T): CallbackProxy<T> {
     return this.callbacks.proxy(fn);
   }
 

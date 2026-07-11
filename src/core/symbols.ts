@@ -1,10 +1,17 @@
 /**
- * A symbol used to mark a property to substitute the entire object
- * with before sending it to the remote side.
- *
- * This is used to mask objects across the wire.
+ * A symbol used to mark a property to assign a serializer for a specific
+ * data type. Serializers are used to marshal data to and from the remote side,
+ * in a way that bypasses the structured cloning algorithm, and allows custom
+ * serialization logic to be applied.
  */
 export const serialize: unique symbol = Symbol("quiry.serialize");
+
+/**
+ * A symbol used to mark a property to override the entire object with before
+ * sending it to the remote side. Unlike {@link serialize}, the overriden value
+ * is not expected to be modified or rebuilt at the remote side.
+ */
+export const override: unique symbol = Symbol("quiry.override");
 
 /**
  * A symbol used to identify an quiry structured value. Used for debugging.

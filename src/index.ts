@@ -7,11 +7,7 @@ import {
   ChildProcess as NJSChildProcess,
   type ForkOptions as NJSForkOptions,
 } from "node:child_process";
-import {
-  isMainThread,
-  Worker as NJSWorker,
-  type WorkerOptions as NJSWorkerOptions,
-} from "node:worker_threads";
+import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "node:worker_threads";
 
 import { EventEmitter } from "node:events";
 
@@ -34,28 +30,31 @@ import {
 } from "./interface/diagnostics";
 
 import { fetchDescriptor } from "./lib/helpers";
-import { randomBytes } from "node:crypto";
 import { contextStorage } from "./lib/call-context";
+import { randomBytes } from "node:crypto";
 
 const registry = new Map<string, RemoteImpl>();
 const peers = new Map<PeerIdentifier, PeerConnection>();
 
+/** Module-level peer lifecycle events. Subscribe via {@link on}. */
 export interface QuiryEvents {
+  /** A new peer was attached. */
   "peer-connected": [handle: PeerConnection];
+  /** A peer's underlying session terminated, gracefully or otherwise. */
   "peer-disconnected": [handle: PeerConnection, reason?: string];
-  shutdown: [reason?: string];
-  error: [error: Error];
 }
 
 const emitter = new EventEmitter<QuiryEvents>();
 /**
- * Module-level diagnostic bus. Carries peer-lifecycle events
- * (`peer:attached`, `peer:detached`). Per-session diagnostics live on
- * `session.diag` (see `Session#diag`). Bridges to `node:diagnostics_channel`
+ * Module-level diagnostic bus. Bridges to `node:diagnostics_channel`
  * under the `quiry:` prefix for external observability tooling.
  */
 export const diagnostic = new DiagnosticBus<DiagnosticQuiryEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
 
+/**
+ * Subscribe to module-level peer lifecycle events. Returns an unsubscribe function.
+ * @see {@link QuiryEvents} for the full event catalog.
+ */
 export function on<K extends keyof QuiryEvents>(
   event: K,
   listener: (...args: QuiryEvents[K]) => void,
@@ -66,29 +65,31 @@ export function on<K extends keyof QuiryEvents>(
 
 // --------- PUBLIC API: PERSISTENCE --------- //
 
-export function parent(): PeerConnection {
-  if (isMainThread) {
-    if (typeof process.send === "function") return attach(new ChildProcessTransport());
-  } else return attach(new WorkerThreadsTransport());
-
-  throw new ReferenceError(
-    "Failed to create transport for parent; are you sure this is running in a worker thread or child process?",
-  );
-}
-
-/** Forks a child process at `filename` and attaches it as a new peer via {@link ChildProcessTransport}. */
+/**
+ * Forks a child (node:child_process) at `filename` and attaches it
+ * as a new peer via {@link ChildProcessTransport}.
+ */
 export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
   const subprocess = NJSFork(filename, options);
   return attach(new ChildProcessTransport(subprocess));
 }
 
-/** Spawns a worker thread at `filename` and attaches it as a new peer via {@link WorkerThreadsTransport}. */
+/**
+ * Spawns a worker (node:worker_threads) at `filename` and attaches it
+ * as a new peer via {@link WorkerThreadsTransport}.
+ */
 export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
   const worker = new NJSWorker(filename, options);
   return attach(new WorkerThreadsTransport(worker));
 }
 
-/** Automatically wrap a port in a transport and attach it as a new peer. */
+/**
+ * Wrap an existing worker thread or child process in the matching transport and attach it
+ * as a new peer. This is the same as constructing {@link ChildProcessTransport} or
+ * {@link WorkerThreadsTransport} yourself and calling {@link attach}.
+ *
+ * @throws A {@link TypeError} if `port` is neither a worker thread nor a child process.
+ */
 export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
   if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port));
   if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port));
@@ -96,6 +97,10 @@ export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
   throw new TypeError("Invalid port; must be a child process or worker thread");
 }
 
+/**
+ * Open a session over `transport` and register it as a new peer connection.
+ * @emits `peer-connected` once the session is open, and `peer-disconnected` when it later terminates.
+ */
 export function attach<TObjects extends RemoteRegistry = {}>(
   transport: Transport<AnyPacket>,
 ): PeerConnection<TObjects> {
@@ -120,6 +125,10 @@ export function attach<TObjects extends RemoteRegistry = {}>(
   return connection as unknown as PeerConnection<TObjects>;
 }
 
+/**
+ * Close a peer connection by its identifier and remove it from the registry.
+ * A no-op if `identifier` doesn't resolve to a known peer.
+ */
 export async function detach(identifier: PeerIdentifier, kill: boolean = false): Promise<void> {
   const connection = peers.get(identifier);
   if (!connection) return;
@@ -267,4 +276,5 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
+export { type Serializer, registerSerializer } from "./lib/transfer";
 export * from "./core/symbols";

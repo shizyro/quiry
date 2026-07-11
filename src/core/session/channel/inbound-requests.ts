@@ -8,6 +8,8 @@ import { contextStorage } from "../../../lib/call-context";
 import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
 
+import * as Transfers from "../../../lib/transfer";
+
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
 import type { InquiryFunc, InquiryRequest } from "../inquiry";
@@ -163,11 +165,10 @@ export class InboundRequests {
             const controller = new AbortController();
             this.#pending_operations.set(packet.id, { controller });
 
+            const restored = this.ctx.callbacks.restoreStubs(packet.payload.args, packet.id);
             const value = contextStorage.run({ signal: controller.signal }, () =>
               (prop as (...args: unknown[]) => unknown)(
-                ...("args" in packet.payload
-                  ? this.ctx.callbacks.restoreStubs(packet.payload.args, packet.id)
-                  : []),
+                ...("args" in packet.payload ? Transfers.restore(restored) : []),
               ),
             );
 
@@ -189,7 +190,8 @@ export class InboundRequests {
           }
         }
 
-        const substituted = this.ctx.callbacks.substitute(result);
+        const marshalled = Transfers.marshal(result);
+        const substituted = this.ctx.callbacks.substitute(marshalled);
         if (!isSerializable(substituted))
           throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
             ...context,
@@ -314,7 +316,7 @@ export class InboundRequests {
         if (stream.cancelled) return;
         if (result.done) break;
 
-        const chunk = result.value;
+        const chunk = Transfers.restore(result.value);
         if (!isSerializable(chunk)) {
           throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Stream chunk is not serializable", {
             cid,

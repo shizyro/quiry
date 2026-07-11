@@ -1,5 +1,5 @@
-import type { Session, Callback } from "./core/session";
-import { attachCallerStack, captureCallerStack, QuiryError } from "./protocol/errors";
+import type { Session, CallbackProxy } from "./core/session";
+import { QuiryError, attachCallerStack, captureCallerStack } from "./protocol/errors";
 
 import type { RemoteRegistry, RemoteImpl } from "./protocol/types";
 import type { Remote, RemotablePropertyKeys } from "./interface/transformers";
@@ -9,6 +9,10 @@ import * as QuirySymbol from "./core/symbols";
 
 export type PeerIdentifier = string;
 
+/**
+ * A handle to one side of an attached IPC session.
+ * Exposes an ergonomic proxy surface methods for direct interation with the remote peer.
+ */
 export class PeerConnection<TObjects extends RemoteRegistry = {}> {
   private readonly cached = new Map<keyof TObjects, RemoteImpl>();
   constructor(
@@ -16,10 +20,19 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
     private readonly session: Session,
   ) {}
 
+  /** Per-session diagnostic bus. See `interface/diagnostics.ts` for the event catalog. */
   get diagnostic(): typeof this.session.diagnostic {
     return this.session.diagnostic;
   }
 
+  /**
+   * Resolve a proxy for the remote object registered under `name`. The proxy has the shape
+   * of `TObjects[name]` (or the explicit `TOverride`, if given), transformed so every method
+   * and property reads as awaitable, and any generator-returning method reads as
+   * async-iterable instead.
+   *
+   * Proxies are cached per `name` — repeated calls with the same name return the same object.
+   */
   remote<TOverride extends RemoteImpl = never, TName extends string = string>(
     name: TName,
   ): Remote<
@@ -38,16 +51,16 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
    * Make a callback handle that can be manually released, or disposed out of scope.
    * This is useful for long-lived callbacks, like event handlers.
    */
-  callback<T extends Function>(fn: T): Callback<T> {
+  callback<T extends Function>(fn: T): CallbackProxy<T> {
     if (typeof fn !== "function")
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Callback must be a function");
-    if (QuirySymbol.serialize in fn)
-      throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Function is already bound as a callback handle");
+    if (QuirySymbol.override in fn)
+      throw new QuiryError(WireStatus.INVALID_ARGUMENT, "This function cannot be reused as a callback proxy");
 
     return this.session.proxy(fn);
   }
 
-  /** Resolves to the value of a remote property. */
+  /** Resolves to the value of a remote property. Imperative equivalent of `await remote(name).property`. */
   async get<TName extends keyof TObjects, TProperty extends RemotablePropertyKeys<TObjects[TName]>>(
     name: TName,
     property: TProperty,
@@ -56,20 +69,27 @@ export class PeerConnection<TObjects extends RemoteRegistry = {}> {
   }
 
   /**
-   * Sends a unary RPC request to the remote object. Supporting both spread and explicit array arguments.
+   * Sends a unary RPC request to the remote object. Supports both spread and explicit array
+   * arguments. Imperative equivalent of `await remote(name).method(...args)`.
    */
   call(name: string, method: string, ...args: unknown[]): Promise<unknown> {
     return this.session.request(name, method, args);
   }
 
   /**
-   * Open a server-streaming call. The returned iterator yields chunks as
-   * they arrive from the remote object.
+   * Open a server-streaming call. The returned iterator yields chunks as they arrive from
+   * the remote object. Imperative equivalent of `for await (const x of remote(name).method(...args))`.
    */
   stream(name: string, method: string, ...args: unknown[]): AsyncIterableIterator<unknown> {
     return this.session.stream(name, method, args);
   }
 
+  /**
+   * Close the session. Graceful by default — both sides drain in-flight work before the
+   * transport tears down. Clears the cached {@link PeerConnection.remote} proxies either way.
+   *
+   * @param graceful - Set to `false` to close immediately, dropping any pending requests.
+   */
   async close(reason?: string, graceful: boolean = true): Promise<void> {
     await this.session.close(reason, graceful).catch(() => {});
     this.cached.clear();

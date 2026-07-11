@@ -4,7 +4,7 @@ import * as QuirySymbol from "../../symbols";
 import { WireKind, WireStatus } from "../../../protocol/wire";
 import type { CallbackId, CorrelationId, InvocationId } from "../../../protocol/types";
 
-import { type CallbackStub, CallbackRegistry, CallbackScope, isCallbackStub } from "../../../lib/callbacks";
+import { CallbackRegistry, CallbackScope, isCallbackEnvelope } from "../../../lib/callbacks";
 import { InFlightTracker, RefScopedTracker } from "../../../lib/tracker";
 
 import { SessionState } from "../state";
@@ -14,18 +14,14 @@ import { fromWireError, QuiryError, toWireError } from "../../../protocol/errors
 import { isPlainObject } from "../../../lib/helpers";
 
 /**
- * A wrapper around a callback function that provides a release method
- * and a dispose symbol for explicit resource management.
+ * A wrapper around a callback function that is proxied to a remote peer
+ * via a {@link CallbackBridge}. Provides an identifier and methods for
+ * explicit resource management.
  */
-export type Callback<T extends Function = () => unknown> = T & {
-  [QuirySymbol.identifier]: CallbackId;
-  [QuirySymbol.release](): boolean;
-  [Symbol.dispose](): void;
-};
-
-export type RemoteCallback<T extends Function = () => unknown> = T & {
+export type CallbackProxy<T extends Function = () => unknown> = T & {
   [QuirySymbol.identifier]: CallbackId;
   [QuirySymbol.release](): void;
+  [Symbol.dispose](): void;
 };
 
 interface PendingCallbackInvocation<T = unknown> {
@@ -105,7 +101,7 @@ export class CallbackBridge {
    * Cycles are short-circuited via the `seen` map.
    */
   restoreStubs<T>(value: T, cid: CorrelationId | null = null): T {
-    const track = (stub: CallbackStub): CallbackId => {
+    const track = (stub: ReturnType<typeof CallbackRegistry.prototype.bind>): CallbackId => {
       if (cid === null || stub.scope === CallbackScope.SESSION) return stub.id;
       let set = this.#remote_stubs.get(cid);
       if (!set) {
@@ -118,8 +114,8 @@ export class CallbackBridge {
 
     const seen = new WeakMap<object, unknown>();
     const walk = (val: unknown): unknown => {
-      if (isCallbackStub(val)) {
-        return this.#makeRemoteCallback(track(val), cid, val.scope);
+      if (isCallbackEnvelope(val)) {
+        return this.#makeRemoteCallback(track(val), cid);
       }
       if (val === null || typeof val !== "object") return val;
 
@@ -152,13 +148,12 @@ export class CallbackBridge {
    * through serialization to the existing stub. Released explicitly,
    * via `[Symbol.dispose]`, or on local GC.
    */
-  proxy<T extends Function>(fn: T): Callback<T> {
+  proxy<T extends Function>(fn: T): CallbackProxy<T> {
     const callback = this.registry.bind(fn);
-    const release = (): boolean => {
+    const release = (): void => {
       const ok = this.registry.release(callback.id);
       if (ok) this.ctx.diagnostic.maybe("callback:release")?.({ cbid: callback.id, reason: "explicit" });
       this.localFinalization.unregister(callback);
-      return ok;
     };
 
     const handle = (...args: unknown[]): unknown => (fn as unknown as (...a: unknown[]) => unknown)(...args);
@@ -166,12 +161,12 @@ export class CallbackBridge {
       [QuirySymbol.identifier]: { value: callback.id, enumerable: false, writable: false },
       [QuirySymbol.release]: { value: release, enumerable: false },
       [Symbol.dispose]: { value: release, enumerable: false },
-      // A serialize field to survive the structured clone hop.
-      [QuirySymbol.serialize]: { value: callback, enumerable: false },
+      // An override value to survive the structured clone hop.
+      [QuirySymbol.override]: { value: callback, enumerable: false, writable: false },
     });
 
     this.localFinalization.register(handle, callback.id);
-    return handle as unknown as Callback<T>;
+    return handle as unknown as CallbackProxy<T>;
   }
 
   // --------- PACKET HANDLING --------- //
@@ -391,20 +386,15 @@ export class CallbackBridge {
   #makeRemoteCallback(
     cbid: CallbackId,
     cid: CorrelationId | null,
-    scope: CallbackScope,
-  ): RemoteCallback<(...args: unknown[]) => Promise<unknown>> {
+  ): CallbackProxy<(...args: unknown[]) => Promise<unknown>> {
     const handle = (...args: unknown[]): Promise<unknown> => {
       const eid = `${cbid}:${Date.now()}:${Math.random().toString(36).substring(2, 15)}` as InvocationId;
       const promise = new Promise<unknown>((resolve, reject) => {
         this.#pending_invocations.set(eid, {
           ref: cid,
           timestamp: Date.now(),
-          resolve: (value: unknown) => {
-            resolve(value);
-          },
-          reject: (error: Error) => {
-            reject(error);
-          },
+          resolve,
+          reject,
         } satisfies PendingCallbackInvocation);
 
         this.outbound.enter();
@@ -450,17 +440,20 @@ export class CallbackBridge {
           type: Packets.CallbackMessageType.RELEASE,
           payload: { ref: cid, callbacks: [cbid], gc: false },
         })
-        .catch(() => {});
+        .catch(() => {
+          // observable; ignore.
+        });
     };
 
     // Add debug symbols to the handle.
     Object.defineProperties(handle, {
       [QuirySymbol.identifier]: { value: cbid, enumerable: false, writable: false },
       [QuirySymbol.release]: { value: release, enumerable: false },
+      [Symbol.dispose]: { value: release, enumerable: false },
     });
 
     if (cid === null) this.remoteFinalization.register(handle, cbid);
-    return handle as unknown as RemoteCallback<typeof handle>;
+    return handle as unknown as CallbackProxy<typeof handle>;
   }
 
   /**
