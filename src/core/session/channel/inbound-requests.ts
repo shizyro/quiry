@@ -1,14 +1,14 @@
 import * as Packets from "../../../protocol/packets";
 import { WireKind, WireStatus } from "../../../protocol/wire";
-import type { CorrelationId } from "../../../protocol/types";
 
 import { InFlightTracker } from "../../../lib/tracker";
 import { contextStorage } from "../../../lib/call-context";
 
+import type { CorrelationId } from "../../../protocol/types";
 import { QuiryError, toWireError } from "../../../protocol/errors";
 import { isAnyIterableIterator, isSerializable } from "../../../lib/helpers";
 
-import * as Transfers from "../../../lib/transfer";
+import * as Transform from "./wire-transform";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
@@ -165,11 +165,9 @@ export class InboundRequests {
             const controller = new AbortController();
             this.#pending_operations.set(packet.id, { controller });
 
-            const restored = this.ctx.callbacks.restoreStubs(packet.payload.args, packet.id);
+            const restored = Transform.fromWire(packet.payload.args, this.ctx.callbacks, packet.id);
             const value = contextStorage.run({ signal: controller.signal }, () =>
-              (prop as (...args: unknown[]) => unknown)(
-                ...("args" in packet.payload ? Transfers.restore(restored) : []),
-              ),
+              (prop as (...args: unknown[]) => unknown)(...("args" in packet.payload ? restored : [])),
             );
 
             if (isAnyIterableIterator(value)) {
@@ -190,18 +188,17 @@ export class InboundRequests {
           }
         }
 
-        const marshalled = Transfers.marshal(result);
-        const substituted = this.ctx.callbacks.substitute(marshalled);
-        if (!isSerializable(substituted))
+        const transformed = Transform.toWire(result, this.ctx.callbacks);
+        if (!isSerializable(transformed))
           throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
             ...context,
-            detail: { value: substituted },
+            detail: { value: transformed },
           });
 
         await this.ctx.send<Packets.ValueResponsePacket>({
           kind: WireKind.RESPONSE,
           type: Packets.ResponseMessageType.VALUE,
-          payload: { ref: packet.id, status: WireStatus.OK, result: substituted },
+          payload: { ref: packet.id, status: WireStatus.OK, result: transformed },
         });
         settled(WireStatus.OK);
       } catch (cause: unknown) {
@@ -316,7 +313,7 @@ export class InboundRequests {
         if (stream.cancelled) return;
         if (result.done) break;
 
-        const chunk = Transfers.restore(result.value);
+        const chunk = Transform.fromWire(result.value, this.ctx.callbacks, cid);
         if (!isSerializable(chunk)) {
           throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Stream chunk is not serializable", {
             cid,

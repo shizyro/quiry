@@ -1,14 +1,14 @@
 import * as Packets from "../../../protocol/packets";
 import { WireKind, WireStatus } from "../../../protocol/wire";
-import type { CorrelationId } from "../../../protocol/types";
 
 import { AsyncQueue } from "../../../lib/queue";
 import { InFlightTracker } from "../../../lib/tracker";
 
+import type { CorrelationId } from "../../../protocol/types";
 import { QuiryError, fromWireError } from "../../../protocol/errors";
 import { isSerializable } from "../../../lib/helpers";
 
-import * as Transfers from "../../../lib/transfer";
+import * as Transform from "./wire-transform";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
@@ -75,9 +75,8 @@ export class OutboundRequests {
     }
 
     const cid = this.ctx.correlate();
-    const marshalled = Transfers.marshal(value);
-    const substituted = this.ctx.callbacks.substitute(marshalled, cid);
-    if (!isSerializable(substituted))
+    const transformed = Transform.toWire(value, this.ctx.callbacks, cid);
+    if (!isSerializable(transformed))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Value is not serializable");
 
     const startedAt = Date.now();
@@ -113,7 +112,7 @@ export class OutboundRequests {
           id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.SET,
-          payload: { object, property, value: substituted },
+          payload: { object, property, value: transformed },
         })
         .catch((cause: unknown) => {
           cleanup();
@@ -182,10 +181,9 @@ export class OutboundRequests {
     }
 
     const cid = this.ctx.correlate();
-    const marshalled = Transfers.marshal(args);
-    const substituted = this.ctx.callbacks.substitute(marshalled, cid);
+    const transformed = Transform.toWire(args, this.ctx.callbacks, cid);
     // Ensure arguments can be cloned through port.
-    if (!isSerializable(substituted))
+    if (!isSerializable(transformed))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
         detail: { args },
       });
@@ -193,7 +191,7 @@ export class OutboundRequests {
     const payload = {
       object,
       method,
-      args: substituted,
+      args: transformed,
     } satisfies Packets.CallRequestPacket["payload"];
     const context = { cid };
 
@@ -287,10 +285,9 @@ export class OutboundRequests {
     }
 
     const cid = this.ctx.correlate();
-    const marshalled = Transfers.marshal(args);
-    const substituted = this.ctx.callbacks.substitute(marshalled, cid);
+    const transformed = Transform.toWire(args, this.ctx.callbacks, cid);
     // Ensure arguments can be cloned through port.
-    if (!isSerializable(substituted))
+    if (!isSerializable(transformed))
       throw new QuiryError(WireStatus.INVALID_ARGUMENT, "Arguments are not serializable", {
         detail: { args },
       });
@@ -362,7 +359,7 @@ export class OutboundRequests {
           id: cid,
           kind: WireKind.REQUEST,
           type: Packets.RequestMessageType.CALL,
-          payload: { object, method, args: substituted },
+          payload: { object, method, args: transformed },
         });
 
         await this.ctx.send<Packets.StreamResponsePacket>({
@@ -479,8 +476,8 @@ export class OutboundRequests {
     }
 
     if (status === WireStatus.OK) {
-      const restored = this.ctx.callbacks.restoreStubs(packet.payload.result);
-      entry.resolve(Transfers.restore(restored));
+      const restored = Transform.fromWire(packet.payload.result, this.ctx.callbacks);
+      entry.resolve(restored);
     } else {
       // Reconstruct the remote error with its full cause chain.
       // The `origin` on the rebuilt error reflects the remote node.
@@ -502,9 +499,8 @@ export class OutboundRequests {
 
     entry.seq++;
     entry.credit.remaining--;
-    const marshalled = Transfers.marshal(chunk);
-    const substituted = this.ctx.callbacks.substitute(marshalled, ref);
-    entry.queue.enqueue(substituted);
+    const transformed = Transform.toWire(chunk, this.ctx.callbacks, ref);
+    entry.queue.enqueue(transformed);
 
     this.ctx.diagnostic.maybe("stream:chunk")?.({ ref, seq, direction: "received" });
 

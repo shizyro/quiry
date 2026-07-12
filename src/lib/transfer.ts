@@ -1,4 +1,4 @@
-import { isPlainObject } from "./helpers";
+import type { StepTransformer } from "./helpers";
 import * as QuirySymbol from "../core/symbols";
 
 /**
@@ -10,18 +10,6 @@ const MARSHAL_MARKER = "__quiry.marshal" as const;
 interface MarshalEnvelope<T = unknown> {
   readonly [MARSHAL_MARKER]: string;
   data: T;
-}
-
-function isSerializedEnvelope<T>(value: unknown): value is MarshalEnvelope<T> {
-  return typeof value === "object" && value !== null && MARSHAL_MARKER in value;
-}
-
-/**
- * Native types structured clone already reconstructs correctly on its own,
- * so we leave them untouched, never walked into or substituted.
- */
-function isOpaqueCloneable(v: unknown): boolean {
-  return v instanceof Date || v instanceof RegExp || v instanceof ArrayBuffer || ArrayBuffer.isView(v);
 }
 
 export interface Serializer<TInstance = unknown, TWire = unknown> {
@@ -46,93 +34,33 @@ interface RegistryEntry extends Required<Serializer<unknown, unknown>> {
 const registryById = new Map<string, RegistryEntry>();
 const registryByCtor = new Map<Function, RegistryEntry>();
 
-export function marshal<T>(value: T): T {
-  const seen = new WeakMap<object, unknown>();
-  const walk = (block: unknown): unknown => {
-    if (block === null || Object(block) !== block) return block;
-    if (isOpaqueCloneable(block)) return block; // structured clone preserves identity for these itself
+export const transform: StepTransformer = (block, { walk, cache }) => {
+  if (QuirySymbol.override in block) {
+    return { value: (block as { [QuirySymbol.override]: unknown })[QuirySymbol.override] };
+  }
+  if (typeof block !== "object") return undefined; // e.g. a function — not this step's concern
 
-    if (QuirySymbol.override in (block as object)) {
-      return (block as unknown as { [QuirySymbol.override]: T })[QuirySymbol.override];
-    }
-    if (typeof block !== "object") return block;
+  const entry = registryByCtor.get((block as { constructor: Function }).constructor);
+  if (!entry) return undefined;
 
-    const cached = seen.get(block);
-    if (cached !== undefined) return cached; // shared refs & cycles through containers we rebuild
+  const placeholder = { [MARSHAL_MARKER]: entry.tag, data: undefined } as MarshalEnvelope;
+  cache(block, placeholder); // register identity BEFORE recursing (enables self-reference)
+  placeholder.data = walk(entry.serialize(block));
+  return { value: placeholder };
+};
 
-    const entry = registryByCtor.get(block.constructor);
-    if (entry) {
-      const placeholder = { [MARSHAL_MARKER]: entry.tag, data: undefined } as MarshalEnvelope;
-      seen.set(block, placeholder); // register identity BEFORE recursing — enables self-reference
-      placeholder.data = walk(entry.serialize(block));
-      return placeholder;
-    }
-
-    if (Array.isArray(block)) {
-      const result: unknown[] = new Array(block.length);
-      seen.set(block as object, result);
-      for (let i = 0; i < block.length; i++) result[i] = walk(block[i]);
-      return result;
-    }
-
-    if (isPlainObject(block)) {
-      const result: Record<string, unknown> = {};
-      seen.set(block, result);
-      for (const [key, val] of Object.entries(block)) {
-        result[key] = walk(val);
-      }
-      return result;
-    }
-
-    // Anything else: an instance with no registered serializer.
-    return block;
-  };
-
-  return walk(value) as T;
-}
-
-export function restore<T>(value: T): T {
-  const seen = new WeakMap<object, unknown>();
-  const walk = (block: unknown): unknown => {
-    if (block === null || typeof block !== "object") return block;
-    if (isOpaqueCloneable(block)) return block;
-
-    const cached = seen.get(block);
-    if (cached !== undefined) return cached;
-
-    if (isSerializedEnvelope(block)) {
-      const entry = registryById.get(block[MARSHAL_MARKER]);
-      if (!entry) {
-        throw new TypeError(
-          `Unknown serializer id "${block[MARSHAL_MARKER]}". Is the class imported (not type-only) and registered on this side?`,
-        );
-      }
-      const instance = entry.deserialize(walk(block.data));
-      seen.set(block, instance); // set AFTER construction
-      return instance;
-    }
-
-    if (Array.isArray(block)) {
-      const result: unknown[] = new Array(block.length);
-      seen.set(block, result);
-      for (let i = 0; i < block.length; i++) result[i] = walk(block[i]);
-      return result;
-    }
-
-    if (isPlainObject(block)) {
-      const result: Record<string, unknown> = {};
-      seen.set(block, result);
-      for (const [k, v] of Object.entries(block)) {
-        result[k] = walk(v);
-      }
-      return result;
-    }
-
-    return block; // host object or already-native type we don't special-case
-  };
-
-  return walk(value) as T;
-}
+export const restore: StepTransformer = (block, { walk, cache }) => {
+  if (!(MARSHAL_MARKER in block)) return undefined;
+  const entry = registryById.get(block[MARSHAL_MARKER] as string);
+  if (!entry) {
+    throw new TypeError(
+      `Unknown serializer id "${block[MARSHAL_MARKER]}". Is the class imported (not type-only) and registered on this side?`,
+    );
+  }
+  const instance = entry.deserialize(walk((block as MarshalEnvelope).data));
+  cache(block, instance); // set AFTER construction
+  return { value: instance };
+};
 
 export function registerSerializer(ctor: Function, moduleUrl: string): void {
   const config = (ctor as any)[QuirySymbol.serialize];

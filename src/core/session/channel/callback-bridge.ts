@@ -4,14 +4,13 @@ import * as QuirySymbol from "../../symbols";
 import { WireKind, WireStatus } from "../../../protocol/wire";
 import type { CallbackId, CorrelationId, InvocationId } from "../../../protocol/types";
 
-import { CallbackRegistry, CallbackScope, isCallbackEnvelope } from "../../../lib/callbacks";
+import { CallbackRegistry } from "../../../lib/callbacks";
 import { InFlightTracker, RefScopedTracker } from "../../../lib/tracker";
 
 import { SessionState } from "../state";
 import type { SessionContext } from "../context";
 
-import { fromWireError, QuiryError, toWireError } from "../../../protocol/errors";
-import { isPlainObject } from "../../../lib/helpers";
+import { QuiryError, fromWireError, toWireError } from "../../../protocol/errors";
 
 /**
  * A wrapper around a callback function that is proxied to a remote peer
@@ -46,7 +45,7 @@ const INFLIGHT_DRAIN_TIMEOUT: number = 5000;
  * @diagnostics `callback:invoke`, `callback:return`, `callback:release`.
  */
 export class CallbackBridge {
-  private readonly registry = new CallbackRegistry();
+  protected readonly registry = new CallbackRegistry();
   private readonly outbound = new InFlightTracker();
 
   /**
@@ -60,7 +59,7 @@ export class CallbackBridge {
   private readonly localFinalization: FinalizationRegistry<CallbackId>;
   private readonly remoteFinalization: FinalizationRegistry<CallbackId>;
 
-  readonly #remote_stubs = new Map<CorrelationId, Set<CallbackId>>();
+  protected readonly remoteCallbacks = new Map<CorrelationId, Set<CallbackId>>();
   readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
 
   constructor(private readonly ctx: BridgeContext) {
@@ -80,64 +79,6 @@ export class CallbackBridge {
         })
         .catch(() => {});
     });
-  }
-
-  // --------- PUBLIC: SUBSTITUTION & RESTORATION --------- //
-
-  /** Walk a value graph, replacing functions with stubs registered under. */
-  substitute<T>(value: T, cid?: CorrelationId): T {
-    return this.registry.substitute(value, cid);
-  }
-
-  /**
-   * Rebuilds the argument list on the receiver side: replaces each {@link CallbackStub} stub
-   * found anywhere in the graph with a live async function that sends `CBK:INVOKE`
-   * and awaits `CBK:RETURN`.
-   *
-   * `CALL`-scoped stub ids are tracked in `#remote_stubs[cid]` for bulk `CBK:RELEASE`
-   * once the owning request completes; `SESSION`-scoped stubs survive the request.
-   *
-   * Walks arrays and plain objects symmetrically with {@link CallbackRegistry.substitute}.
-   * Cycles are short-circuited via the `seen` map.
-   */
-  restoreStubs<T>(value: T, cid: CorrelationId | null = null): T {
-    const track = (stub: ReturnType<typeof CallbackRegistry.prototype.bind>): CallbackId => {
-      if (cid === null || stub.scope === CallbackScope.SESSION) return stub.id;
-      let set = this.#remote_stubs.get(cid);
-      if (!set) {
-        set = new Set();
-        this.#remote_stubs.set(cid, set);
-      }
-      set.add(stub.id);
-      return stub.id;
-    };
-
-    const seen = new WeakMap<object, unknown>();
-    const walk = (val: unknown): unknown => {
-      if (isCallbackEnvelope(val)) {
-        return this.#makeRemoteCallback(track(val), cid);
-      }
-      if (val === null || typeof val !== "object") return val;
-
-      const cached = seen.get(val as object);
-      if (cached !== undefined) return cached;
-
-      if (Array.isArray(val)) {
-        const result: unknown[] = new Array(val.length);
-        seen.set(val as object, result);
-        for (let i = 0; i < val.length; i++) result[i] = walk(val[i]);
-        return result;
-      }
-      if (isPlainObject(val)) {
-        const result: Record<string, unknown> = {};
-        seen.set(val as object, result);
-        for (const [key, v] of Object.entries(val as object)) result[key] = walk(v);
-        return result;
-      }
-      return val;
-    };
-
-    return walk(value) as T;
   }
 
   // --------- PUBLIC: PROXY HANDLES --------- //
@@ -307,8 +248,8 @@ export class CallbackBridge {
   async releaseRemoteStubs(cid: CorrelationId): Promise<void> {
     await this.#drainInflightInvocations(cid);
 
-    const stubs = this.#remote_stubs.get(cid);
-    this.#remote_stubs.delete(cid);
+    const stubs = this.remoteCallbacks.get(cid);
+    this.remoteCallbacks.delete(cid);
     if (!stubs || stubs.size === 0) return;
 
     await this.ctx.send<Packets.CallbackReleasePacket>({
@@ -356,7 +297,7 @@ export class CallbackBridge {
     this.registry.clear();
     this.outbound.drain();
     this.invocations.drain();
-    this.#remote_stubs.clear();
+    this.remoteCallbacks.clear();
   }
 
   // --------- PUBLIC: INTROSPECTION --------- //
@@ -371,7 +312,7 @@ export class CallbackBridge {
 
   get remoteStubCount(): number {
     let count = 0;
-    for (const set of this.#remote_stubs.values()) count += set.size;
+    for (const set of this.remoteCallbacks.values()) count += set.size;
     return count;
   }
 
@@ -383,7 +324,7 @@ export class CallbackBridge {
    * by `defaultTimeout`; SESSION-scoped invocations are intentionally
    * unbounded (long-lived event handlers are the whole point).
    */
-  #makeRemoteCallback(
+  protected makeRemoteCallback(
     cbid: CallbackId,
     cid: CorrelationId | null,
   ): CallbackProxy<(...args: unknown[]) => Promise<unknown>> {

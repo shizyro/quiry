@@ -1,5 +1,4 @@
 import type { AnyPacket } from "../protocol/packets";
-import * as QuirySymbol from "../core/symbols";
 
 /**
  * Whether `value` can survive a structured-clone hop across a thread or
@@ -66,6 +65,14 @@ export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/**
+ * Native types structured clone already reconstructs correctly on its own,
+ * so we leave them untouched, never walked into or substituted.
+ */
+export function isOpaqueCloneable(v: unknown): boolean {
+  return v instanceof Date || v instanceof RegExp || v instanceof ArrayBuffer || ArrayBuffer.isView(v);
+}
+
 export function isAnyIterableIterator(
   value: unknown,
 ): value is IterableIterator<unknown> | AsyncIterableIterator<unknown> {
@@ -126,4 +133,75 @@ export function fetchDescriptor(
     self = Object.getPrototypeOf(self);
   }
   return [null, undefined];
+}
+
+/**
+ * This is how independent transforms (e.g. class-instance serialization,
+ * callback substitution) plug into the same {@link rebuild} pass.
+ */
+export type StepTransformer = (node: object, ctx: WalkContext) => { value: unknown } | undefined;
+
+export interface WalkContext {
+  /** Recursively applies the same walk (and all combined steps) to a nested value. */
+  walk(value: unknown): unknown;
+  /**
+   * Remembers `replacement` as the result for `original`, so that if the
+   * same object is reached again elsewhere in the graph, the walk returns
+   * this replacement instead of processing it twice. Call this *before*
+   * recursing into `original`'s own data if that data can reference
+   * `original` itself (self-reference), or *after* building `replacement`
+   * otherwise.
+   */
+  cache(original: object, replacement: unknown): void;
+}
+
+/**
+ * Walks and deep-clones a value, giving each transformer a chance to
+ * intercept and rebuild a node before the default array/plain object
+ * walk logic runs.
+ *
+ * Transformers are tried in order at every node (arrays, plain objects,
+ * and any other object type); the first one to return a value other than
+ * `undefined` wins and that value is used as the rebuilt node, and no
+ * further transformers or default handling run for that node.
+ */
+export function rebuild<T>(value: T, ...transformers: StepTransformer[]): T {
+  const seen = new WeakMap<object, unknown>();
+  const ctx: WalkContext = {
+    walk,
+    cache: (original, replacement) => seen.set(original, replacement),
+  };
+
+  function walk(block: unknown): unknown {
+    if (block === null || Object(block) !== block) return block;
+    if (isOpaqueCloneable(block)) return block;
+
+    const cached = seen.get(block as object);
+    if (cached !== undefined) return cached;
+
+    for (const step of transformers) {
+      const result = step(block as object, ctx);
+      if (result !== undefined) return result.value;
+    }
+
+    if (typeof block !== "object") return block; // e.g. a function no step handled
+
+    if (Array.isArray(block)) {
+      const result: unknown[] = new Array(block.length);
+      seen.set(block, result);
+      for (let i = 0; i < block.length; i++) result[i] = walk(block[i]);
+      return result;
+    }
+
+    if (isPlainObject(block)) {
+      const result: Record<string, unknown> = {};
+      seen.set(block, result);
+      for (const [key, val] of Object.entries(block)) result[key] = walk(val);
+      return result;
+    }
+
+    return block;
+  }
+
+  return walk(value) as T;
 }

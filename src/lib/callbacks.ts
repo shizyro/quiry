@@ -1,6 +1,4 @@
-import { isPlainObject } from "./helpers";
 import type { CallbackId, CorrelationId } from "../protocol/types";
-
 import { randomUUID } from "node:crypto";
 
 /**
@@ -125,54 +123,6 @@ export class CallbackRegistry {
     this.#by_id.clear();
     this.#by_ref.clear();
     this.#session_scoped.clear();
-  }
-
-  /**
-   * Substitute all functions reachable through the argument graph with callback stubs,
-   * register them under the given correlation ID (if any), and return a transformed copy.
-   *
-   * Walks arrays and plain objects recursively; class instances and other non-plain
-   * objects are returned as-is (they wouldn't survive structured cloning anyway).
-   * Already-substituted {@link CallbackEnvelope} stubs pass through untouched. Cycles are
-   * detected and short-circuited.
-   */
-  substitute<T>(value: T, cid?: CorrelationId): T {
-    const seen = new WeakMap<object, unknown>();
-    const scope = cid ? CallbackScope.CALL : CallbackScope.SESSION;
-
-    const walk = (block: unknown): unknown => {
-      if (typeof block === "function") {
-        // @ts-expect-error - `scope` is always `CallbackScope.CALL` or `CallbackScope.SESSION`
-        const id = this.register(block, scope, cid);
-        return CallbackRegistry.envelope(id, scope);
-      }
-
-      if (block === null || typeof block !== "object") return block;
-      if (isCallbackEnvelope(block)) return block;
-
-      const cached = seen.get(block as object);
-      if (cached !== undefined) return cached;
-
-      if (Array.isArray(block)) {
-        const result: unknown[] = new Array(block.length);
-        seen.set(block as object, result);
-        for (let i = 0; i < block.length; i++) result[i] = walk(block[i]);
-        return result;
-      }
-
-      if (isPlainObject(block)) {
-        const result: Record<string, unknown> = {};
-        seen.set(block, result);
-        for (const [key, val] of Object.entries(block)) {
-          result[key] = walk(val);
-        }
-        return result;
-      }
-
-      return block;
-    };
-
-    return walk(value) as T;
   }
 
   /** Registers a function as a `SESSION`-scoped callback and returns a callback handle. */
