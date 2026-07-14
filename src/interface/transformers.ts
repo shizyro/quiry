@@ -11,11 +11,16 @@ type AnyFn = (...args: any[]) => any;
 type Promisify<T> = [T] extends [Promise<unknown>] ? T : Promise<T>;
 type UnwrapIterable<T> = T extends Iterable<infer R> ? R : T extends AsyncIterable<infer R> ? R : never;
 
+type Opaque = ArrayBuffer | SharedArrayBuffer | ArrayBufferView;
+
 /** Recursively transforms all return values in a type to promises. */
-type DeepAsync<T> = [T] extends [(...args: infer TArguments) => infer TReturn]
-  ? (...args: TArguments) => Promisify<DeepAsync<Awaited<TReturn>>> // functions -> async functions
-    : [T] extends [readonly (infer U)[]] ? ReadonlyArray<DeepAsync<U>> // arrays -> recursively transform elements
-      : [T] extends [object] ? { [K in keyof T]: DeepAsync<T[K]> } // objects -> recursively transform properties
+type DeepAsync<T> = [T] extends [Opaque] ? T
+  : [T] extends [(...args: infer TArguments) => infer TReturn]
+    ? (...args: TArguments) => Promisify<DeepAsync<Awaited<TReturn>>> // functions -> async functions
+    : [T] extends [readonly (infer U)[]]
+      ? ReadonlyArray<DeepAsync<U>> // arrays -> recursively transform elements
+      : [T] extends [object]
+        ? { [K in keyof T]: DeepAsync<T[K]> } // objects -> recursively transform properties
         : T; // primitives stay unchanged
 
 // Filter for callable members
@@ -30,11 +35,9 @@ export type RemotablePropertyKeys<T> = {
 // Per-method remote transformation
 
 type RemoteReturn<T extends AnyFn> =
-  ReturnType<T> extends string
-    ? Promise<DeepAsync<Awaited<ReturnType<T>>>>
-    : ReturnType<T> extends Iterable<any> | AsyncIterable<any>
-      ? AsyncIterableIterator<UnwrapIterable<ReturnType<T>>>
-      : Promise<DeepAsync<Awaited<ReturnType<T>>>>;
+  ReturnType<T> extends Generator<any, any, any> | AsyncGenerator<any, any, any>
+    ? AsyncIterableIterator<UnwrapIterable<ReturnType<T>>>
+    : Promise<DeepAsync<Awaited<ReturnType<T>>>>;
 
 type RemoteFunction<T extends AnyFn> = ((...args: Parameters<T>) => RemoteReturn<T>) & {
   [QuirySymbol.control]: (signal: AbortSignal) => (...args: Parameters<T>) => RemoteReturn<T>
