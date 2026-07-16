@@ -1,4 +1,5 @@
 import type { StepTransformer } from "./helpers";
+import type { Opaque } from "../interface/transformers";
 import * as QuirySymbol from "../core/symbols";
 
 /**
@@ -17,6 +18,8 @@ export interface Serializer<TInstance = unknown, TWire = unknown> {
   serialize(value: TInstance): TWire;
   deserialize(value: TWire): TInstance;
 }
+
+export type Serializable = Opaque;
 
 function isValidSerializer(v: unknown): v is Serializer<unknown, unknown> {
   return (
@@ -63,7 +66,7 @@ export const restore: StepTransformer = (block, { walk, cache }) => {
 };
 
 export function registerSerializer(ctor: Function, moduleUrl: string): void {
-  const config = (ctor as any)[QuirySymbol.serialize];
+  const config = (ctor as any)[QuirySymbol.serializer];
   if (!isValidSerializer(config)) {
     throw new TypeError(`${ctor.name}: malformed or missing Quiry.serialize`);
   }

@@ -276,5 +276,5 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
-export { type Serializer, registerSerializer } from "./lib/transfer";
+export { type Serializer, type Serializable, registerSerializer } from "./lib/transfer";
 export * from "./core/symbols";

@@ -209,10 +209,10 @@ class Money {
   ) {}
 
   // define custom serialization strategy
-  static readonly [Quiry.serialize] = {
+  static readonly [Quiry.serializer] = {
     serialize: (value: Money) => ({ cents: value.cents, currency: value.currency }),
     deserialize: (data: { cents: number; currency: string }) => new Money(data.cents, data.currency),
-  };
+  } satisfies Quiry.Serializer;
 
   static {
     // announce and register the serializer
@@ -224,16 +224,12 @@ class Money {
 Once registered, instances of that class crosses like any other value, and comes out at the other side as a constructed instance, not a shell of one.
 
 ```typescript
-await peer.remote<WalletService>("wallet").charge(new Money(500, "USD"));
+await peer.remote<WalletService>("wallet").charge(new Money(500, "EUR"));
 ```
 
-Registration happens when the class loads, so both sides need `Money` itself imported
-at runtime — a type-only import never runs the class body, and the peer won't know
-what to reconstruct.
+Registration happens when the class loads, so both sides need `Money` itself imported at runtime — a type-only import never runs the class body, and the peer won't know what to reconstruct. Please check [this example](https://github.com/shizyro/quiry/tree/main/examples/custom-serialization) for a more advanced showcase.
 
-If your build renames classes during minification, or two classes would otherwise
-collide, pass an explicit `id` within the serializer body instead of relying
-on the derived one.
+> If your build renames classes during minification, or two classes would otherwise collide, pass an explicit `id` within the serializer body instead of relying on the derived one.
 
 ## Limitations
 
