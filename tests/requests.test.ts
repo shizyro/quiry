@@ -111,7 +111,7 @@ describe("Session requests", () => {
     expect(producerInquiry).not.toHaveBeenCalled();
   });
 
-  it("rejects with INTERNAL when the producer returns a value that can't survive structured clone", async () => {
+  it("rejects when the producer returns a value that can't survive structured clone", async () => {
     pair = openSessionPair({
       producerInquiry: () => ({ value: () => Symbol("nope") }),
     });
@@ -119,7 +119,7 @@ describe("Session requests", () => {
     const error = await pair.consumer.request("svc", "_", []).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(QuiryError);
-    expect((error as QuiryError).code).toBe(WireStatus.INTERNAL);
+    expect((error as QuiryError).code).toBe(WireStatus.DATA_LOSS);
   });
 
   describe("request control", () => {

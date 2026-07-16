@@ -190,7 +190,7 @@ export class InboundRequests {
 
         const transformed = Transform.toWire(result, this.ctx.callbacks);
         if (!isSerializable(transformed))
-          throw new QuiryError(WireStatus.INTERNAL, "Response value is not serializable", {
+          throw new QuiryError(WireStatus.DATA_LOSS, "Response value is not serializable", {
             ...context,
             detail: { value: transformed },
           });
