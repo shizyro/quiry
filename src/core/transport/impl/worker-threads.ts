@@ -62,9 +62,13 @@ export class WorkerThreadsTransport extends BaseTransport {
 
   private readonly onPortExit = (code: number): void => {
     if (this.state === TransportState.CLOSED) return;
-    // Code 0 is a clean, cooperative shutdown (e.g. `process.exit(0)`); anything else
-    // is abnormal and must be surfaced to the session as `terminated`.
+    /**
+     * Code 0 is a clean cooperative shutdown (e.g. `process.exit(0)`).
+     * However, code 1 is an explicit termination from the remote; anything else
+     * is abnormal and must be surfaced to the session as `terminated`.
+     */
     if (code === 0) return void this.close();
+    else if (code === 1) return void this.close("terminated");
     this.terminate(`Worker thread exited with code ${code}`);
   };
 
