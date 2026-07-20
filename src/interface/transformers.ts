@@ -56,10 +56,10 @@ type RemoteFunction<T extends AnyFn> = ((...args: Parameters<T>) => RemoteReturn
   [QuirySymbol.control]: (signal: AbortSignal) => (...args: Parameters<T>) => RemoteReturn<T>;
 };
 
-type RemoteProperty<T> = T extends AnyFn ? RemoteFunction<T>
-  : T extends abstract new (...args: infer Args) => infer Instance
-    ? { new (...args: Args): Promise<Remote<Instance>> }
-    : T extends Serializable | Opaque ? Promisify<T>
+type RemoteProperty<T> = [T] extends [Serializable | Opaque] ? Promisify<T>
+  : T extends AnyFn ? RemoteFunction<T>
+    : T extends abstract new (...args: infer Args) => infer Instance
+      ? { new (...args: Args): Promise<Remote<Instance>> }
       : T extends object ? Remote<T>
         : never;
 
