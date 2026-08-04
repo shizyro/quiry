@@ -69,18 +69,26 @@ export function on<K extends keyof QuiryEvents>(
  * Forks a child (node:child_process) at `filename` and attaches it
  * as a new peer via {@link ChildProcessTransport}.
  */
-export function fork(filename: string | URL, options: NJSForkOptions = {}): PeerConnection {
+export function fork<TObjects extends RemoteRegistry = {}>(
+  filename: string | URL,
+  options: NJSForkOptions = {},
+  identifier?: PeerIdentifier,
+): PeerConnection<TObjects> {
   const subprocess = NJSFork(filename, options);
-  return attach(new ChildProcessTransport(subprocess));
+  return attach(new ChildProcessTransport(subprocess), identifier);
 }
 
 /**
  * Spawns a worker (node:worker_threads) at `filename` and attaches it
  * as a new peer via {@link WorkerThreadsTransport}.
  */
-export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): PeerConnection {
+export function spawn<TObjects extends RemoteRegistry = {}>(
+  filename: string | URL,
+  options: NJSWorkerOptions = {},
+  identifier?: PeerIdentifier,
+): PeerConnection<TObjects> {
   const worker = new NJSWorker(filename, options);
-  return attach(new WorkerThreadsTransport(worker));
+  return attach(new WorkerThreadsTransport(worker), identifier);
 }
 
 /**
@@ -90,9 +98,12 @@ export function spawn(filename: string | URL, options: NJSWorkerOptions = {}): P
  *
  * @throws A {@link TypeError} if `port` is neither a worker thread nor a child process.
  */
-export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
-  if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port));
-  if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port));
+export function wrap<TObjects extends RemoteRegistry = {}>(
+  port: NJSWorker | NJSChildProcess,
+  identifier?: PeerIdentifier,
+): PeerConnection<TObjects> {
+  if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port), identifier);
+  if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port), identifier);
 
   throw new TypeError("Invalid port; must be a child process or worker thread");
 }
@@ -103,9 +114,21 @@ export function wrap(port: NJSWorker | NJSChildProcess): PeerConnection {
  */
 export function attach<TObjects extends RemoteRegistry = {}>(
   transport: Transport<AnyPacket>,
+  identifier?: PeerIdentifier,
 ): PeerConnection<TObjects> {
+  if (identifier) {
+    if (peers.has(identifier))
+      throw new QuiryError(
+        WireStatus.FAILED_PRECONDITION,
+        `Peer with identifier ${identifier} is already linked`,
+      );
+  } else {
+    do {
+      identifier = randomBytes(4).toString("hex");
+    } while (peers.has(identifier));
+  }
+
   const session = new Session(transport, handleInquiry).open();
-  const identifier = randomBytes(4).toString("hex");
   const connection = new PeerConnection(identifier, session);
   peers.set(identifier, connection);
 
@@ -275,6 +298,6 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
   };
 }
 
-export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus };
+export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus, type PeerConnection };
 export { type Serializer, type Serializable, registerSerializer } from "./lib/transfer";
 export * from "./core/symbols";
