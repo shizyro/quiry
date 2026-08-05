@@ -12,7 +12,13 @@ import { Worker as NJSWorker, type WorkerOptions as NJSWorkerOptions } from "nod
 import { EventEmitter } from "node:events";
 
 import { QuiryError } from "./protocol/errors";
-import { type InquiryDescriptor, Session, type InquiryFunc, type InquiryRequest } from "./core/session";
+import {
+  Session,
+  type InquiryFunc,
+  type InquiryRequest,
+  type InquiryDescriptor,
+  type SessionOptions,
+} from "./core/session";
 import { PeerConnection, type PeerIdentifier } from "./internal";
 
 import { WireStatus } from "./protocol/wire";
@@ -65,17 +71,22 @@ export function on<K extends keyof QuiryEvents>(
 
 // --------- PUBLIC API: PERSISTENCE --------- //
 
+const PEER_OPTIONS_KEYS = ["identifier", "creditWindow", "drainTimeout"] as const;
+export interface PeerAttachOptions extends SessionOptions {
+  identifier?: PeerIdentifier;
+}
+
 /**
  * Forks a child (node:child_process) at `filename` and attaches it
  * as a new peer via {@link ChildProcessTransport}.
  */
 export function fork<TObjects extends RemoteRegistry = {}>(
   filename: string | URL,
-  options: NJSForkOptions = {},
-  identifier?: PeerIdentifier,
+  options: NJSForkOptions & PeerAttachOptions = {},
 ): PeerConnection<TObjects> {
-  const subprocess = NJSFork(filename, options);
-  return attach(new ChildProcessTransport(subprocess), identifier);
+  const [peer_options, fork_options] = partition(options, PEER_OPTIONS_KEYS);
+  const subprocess = NJSFork(filename, fork_options);
+  return attach(new ChildProcessTransport(subprocess), peer_options);
 }
 
 /**
@@ -84,11 +95,11 @@ export function fork<TObjects extends RemoteRegistry = {}>(
  */
 export function spawn<TObjects extends RemoteRegistry = {}>(
   filename: string | URL,
-  options: NJSWorkerOptions = {},
-  identifier?: PeerIdentifier,
+  options: NJSWorkerOptions & PeerAttachOptions = {},
 ): PeerConnection<TObjects> {
-  const worker = new NJSWorker(filename, options);
-  return attach(new WorkerThreadsTransport(worker), identifier);
+  const [peer_options, worker_options] = partition(options, PEER_OPTIONS_KEYS);
+  const worker = new NJSWorker(filename, worker_options);
+  return attach(new WorkerThreadsTransport(worker), peer_options);
 }
 
 /**
@@ -100,10 +111,10 @@ export function spawn<TObjects extends RemoteRegistry = {}>(
  */
 export function wrap<TObjects extends RemoteRegistry = {}>(
   port: NJSWorker | NJSChildProcess,
-  identifier?: PeerIdentifier,
+  options?: PeerAttachOptions,
 ): PeerConnection<TObjects> {
-  if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port), identifier);
-  if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port), identifier);
+  if (port instanceof NJSChildProcess) return attach(new ChildProcessTransport(port), options);
+  if (port instanceof NJSWorker) return attach(new WorkerThreadsTransport(port), options);
 
   throw new TypeError("Invalid port; must be a child process or worker thread");
 }
@@ -114,8 +125,9 @@ export function wrap<TObjects extends RemoteRegistry = {}>(
  */
 export function attach<TObjects extends RemoteRegistry = {}>(
   transport: Transport<AnyPacket>,
-  identifier?: PeerIdentifier,
+  options: PeerAttachOptions = {},
 ): PeerConnection<TObjects> {
+  let { identifier, ...rest } = options;
   if (identifier) {
     if (peers.has(identifier))
       throw new QuiryError(
@@ -128,7 +140,7 @@ export function attach<TObjects extends RemoteRegistry = {}>(
     } while (peers.has(identifier));
   }
 
-  const session = new Session(transport, handleInquiry).open();
+  const session = new Session(transport, handleInquiry, rest).open();
   const connection = new PeerConnection(identifier, session);
   peers.set(identifier, connection);
 
@@ -296,6 +308,23 @@ function makeInquiryDescriptor<T = unknown>(impl: object, key: PropertyKey): Inq
     writable: isFunction ? false : isData ? !!descriptor.writable : !!descriptor.set,
     enumerable: !!descriptor.enumerable,
   };
+}
+
+function partition<T extends object, K extends keyof T>(
+  obj: T,
+  keys: readonly K[],
+): [Pick<T, K>, Omit<T, K>] {
+  const picked = {} as Pick<T, K>;
+  const omitted = { ...obj } as Omit<T, K>;
+
+  for (const key of keys) {
+    if (key in obj) {
+      picked[key] = obj[key];
+      delete (omitted as any)[key];
+    }
+  }
+
+  return [picked, omitted];
 }
 
 export { QuiryError, WorkerThreadsTransport, ChildProcessTransport, WireStatus, type PeerConnection };

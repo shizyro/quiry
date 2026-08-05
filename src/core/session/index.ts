@@ -63,7 +63,7 @@ interface InteractiveRouter {
   ): Unsubscribe;
 }
 
-interface SessionOptions {
+export interface SessionOptions {
   drainTimeout?: number;
   creditWindow?: number;
 }
