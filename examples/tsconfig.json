@@ -2,6 +2,6 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "rootDir": "../",
-    "paths": { "~/*": ["../src/*"] }
+    "paths": { "~": ["../src/index.ts"] },
   },
 }

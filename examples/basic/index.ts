@@ -1,123 +1,55 @@
-import * as Quiry from "~/index";
+import * as Quiry from "~";
+import { log, join } from "../shared";
 
-import { isMainThread } from "node:worker_threads";
-import { openSync, readSync, closeSync } from "node:fs";
-import { join } from "node:path";
+import type { Registry } from "./worker";
 
-import EventEmitter from "node:events";
+async function main() {
+  const peer = Quiry.spawn<Registry>(join(import.meta.dirname, "worker.ts"));
+  const solver = peer.remote("solver");
 
-class GreeterService {
-  greet(name: string): void {
-    console.log(`\n\tHello, ${name}!\n`);
+  // [unary calls]
+  await peer.remote("greeter").greet("World"); // > "Hello, World!"
+  const result = await solver.evaluate(1);
+
+  // [object property access]
+  log(`result: ${result} (precision: ${await solver.precision})`);
+
+  // [iterators]
+  const iterations = [];
+  for await (const value of solver.iterate(result)) {
+    iterations.push(value);
+    if (iterations.length >= 10) break; // propagates the break to the caller
   }
+  log(`iterations: [${iterations.slice(0, 3).join(", ")}, ..., ${iterations.slice(-3).join(", ")}]`);
+
+  // [functional arguments]
+  void peer.remote("timer").delay(() => {
+    log(">> Hello! This is called from remote side, one second later.");
+  }, 1000); // inline callbacks are released once the remote call is settled
+
+  // [functional return values]
+  /**
+   * Returned function stubs are automatically "released" from remote peer once
+   * they are garbage collected on the caller's side.
+   *
+   * In this example, `.within` returns a predicate function that could be used
+   * just like any other. Note that it is reflected as asynchronous, and should
+   * be used as such.
+   */
+  const predicate = await solver.within(0.1);
+  const samples = [0.05, 0.1, 0.15, -0.08, -0.3, 0.4];
+  const results = await Promise.all(samples.map(predicate));
+  const filtered = samples.filter((_, indx) => results[indx]);
+  log(samples, "->", filtered);
+
+  /**
+   * Closing the peer will release all resources and close the connection.
+   *
+   * However, this does not immediately cancel pending remote calls, but rather
+   * waits for them to complete before settling. This is indefinite by default,
+   * but can be bound by a configurable `drainTimeout` option.
+   */
+  await peer.close();
 }
 
-class MathService {
-  readonly pi: number = Math.PI;
-
-  add(a: number, b: number): number {
-    return a + b;
-  }
-
-  multiply(a: number, b: number): number {
-    return a * b;
-  }
-
-  threshold(min: number) {
-    return (value: number): boolean => {
-      return value >= min;
-    };
-  }
-
-  *prime(start: number = 2): Generator<number> {
-    let n = Math.max(2, Math.floor(start));
-    while (true) {
-      if (isPrime(n)) yield n;
-      n++;
-    }
-  }
-}
-
-function isPrime(n: number): boolean {
-  if (n < 2) return false;
-  if (n === 2) return true;
-  if (n % 2 === 0) return false;
-  for (let i = 3; i * i <= n; i += 2) {
-    if (n % i === 0) return false;
-  }
-  return true;
-}
-
-type ExampleEvents = { foo: [query?: string]; bar: [] };
-class EventService {
-  readonly emitter = new EventEmitter();
-  get eventNames(): string[] {
-    return ["foo", "bar"];
-  }
-
-  on<TEventName extends keyof ExampleEvents>(
-    event: TEventName,
-    listener: (...args: ExampleEvents[TEventName]) => void,
-  ) {
-    this.emitter.on(event, listener);
-    return () => void this.emitter.off(event, listener);
-  }
-
-  emit<TEventName extends keyof ExampleEvents>(
-    event: TEventName,
-    ...args: ExampleEvents[TEventName]
-  ): boolean {
-    return this.emitter.emit(event, ...args);
-  }
-}
-
-class FileService {
-  constructor(private readonly root: string) {}
-
-  open(path: string) {
-    const handle = openSync(join(this.root, path), "r");
-    return {
-      read: (n: number) => {
-        const buffer = Buffer.alloc(n);
-        const bytesRead = readSync(handle, buffer, 0, n, null);
-        // (must be converted to string to survive serialization)
-        return buffer.subarray(0, bytesRead).toString();
-      },
-      close: () => {
-        closeSync(handle);
-      },
-    };
-  }
-}
-
-export type ExampleRegistry = {
-  greeter: GreeterService;
-  math: MathService;
-  events: EventService;
-  file: FileService;
-  timer: {
-    delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T>;
-  };
-};
-
-async function bootstrap() {
-  Quiry.expose("greeter", new GreeterService());
-  Quiry.expose("math", new MathService());
-
-  Quiry.expose("timer", {
-    async delay<T>(handler: (...args: any[]) => T, ms: number): Promise<T> {
-      await new Promise((resolve) => setTimeout(resolve, ms));
-      return handler(1, 2, 3);
-    },
-  });
-
-  Quiry.expose("file", () => new FileService(__dirname));
-  Quiry.expose("events", () => new EventService());
-
-  Quiry.spawn(join(__dirname, "worker.ts"));
-}
-
-if (isMainThread) {
-  console.clear();
-  void bootstrap();
-}
+main().catch(console.error);

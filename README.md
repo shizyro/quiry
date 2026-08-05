@@ -10,9 +10,9 @@ $ npm install --save quiry
 
 ---
 
-You expose an object on one side, and use it from the other side as if it were local. Methods, properties, and even generators carry across the boundary.
+You expose an object on <u>either</u> sides, and use it from the other side as if it were local. Methods, properties, and even generators carry across the boundary.
 
-If it looks like a function, you call it. If it looks like a value, you read it — or assign to it, and the write travels across the same way.
+If it looks like a function, you call it. If it looks like a value, you read or assign to it.
 
 ## Basic Usage
 
@@ -80,7 +80,7 @@ const worker = new Worker("worker.ts");
 Quiry.attach(new WorkerThreadsTransport(worker));
 ```
 
-For a more detailed showcase, make sure to check this [basic example](https://github.com/shizyro/quiry/tree/main/examples/basic);
+For a more thorough showcase, make sure to check this [basic example](./examples/basic).
 
 ## Streaming
 
@@ -214,6 +214,7 @@ class Money {
     deserialize: (data: { cents: number; currency: string }) => new Money(data.cents, data.currency),
   } satisfies Quiry.Serializer;
 
+  // (this is called only once when the class is first loaded)
   static {
     // announce and register the serializer
     Quiry.registerSerializer(this, import.meta.url);
@@ -227,7 +228,7 @@ Once registered, instances of that class crosses like any other value, and comes
 await peer.remote<WalletService>("wallet").charge(new Money(500, "EUR"));
 ```
 
-Registration happens when the class loads, so both sides need `Money` itself imported at runtime — a type-only import never runs the class body, and the peer won't know what to reconstruct. Please check [this example](https://github.com/shizyro/quiry/tree/main/examples/custom-serialization) for a more advanced showcase.
+Registration happens when the class loads, so both sides need the file itself imported at runtime — a type-only import never runs the class body, and the peer won't know what to reconstruct. Please check [this example](./examples/custom-serialization) for a more advanced showcase.
 
 > If your build renames classes during minification, or two classes would otherwise collide, pass an explicit `id` within the serializer body instead of relying on the derived one.
 
@@ -242,7 +243,7 @@ Some values are intentionally limited or not supported yet:
 - class instances cross the boundary as plain data by default — register a [custom serializer](#custom-serialization) to preserve them as live instances instead
 - methods returning `this` are not useful across the boundary
 - non-serializable values do not work unless provided a specific proxy mechanism for them
-- functions are supported through callback proxies and returned function stubs, not through structured cloning itself
+- remote transformer can't correctly type methods where a generic type parameter correlates two or more arguments — this is a static TypeScript limitation, and requires a manual override per affected method. See [support for correlated union types](https://github.com/microsoft/TypeScript/issues/30581)
 - streaming only flows one way — a returned generator becomes a stream, a generator passed as an argument does not
 
 Transferables objects are supported and are collected automatically from requests. While the structured clone algorithm accepts `SharedArrayBuffer` objects, shared memory is only accessible to worker threads; child processes operate in entirely isolated memory spaces.
