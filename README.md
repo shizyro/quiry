@@ -3,7 +3,7 @@
 An implementation of a transparent, type-safe IPC for worker threads and child processes in Node. It is a thin facade over message-based interprocess APIs, bridging local objects across boundaries. Designed so that the obvious way to use it is also the correct way.
 
 ```
-$ npm install --save quiry
+$ pnpm i jsr:@shizyro/quiry
 ```
 
 ![Preview](https://github.com/user-attachments/assets/551f6db6-d1df-4b56-a1da-f01ec25b66a9)
