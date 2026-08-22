@@ -1,0 +1,60 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      jsr:
+        type: boolean
+        default: true
+        description: Publish to JSR
+      npm:
+        type: boolean
+        default: false
+        description: Publish to NPM
+
+  workflow_call:
+    inputs:
+      jsr:
+        type: boolean
+        default: true
+      npm:
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        if: ${{ inputs.jsr || inputs.npm }}
+        uses: actions/checkout@v7
+
+      - name: Setup environment
+        if: ${{ inputs.jsr || inputs.npm }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+
+      - name: Install dependencies
+        if: ${{ inputs.jsr || inputs.npm }}
+        run: npm ci
+
+      - name: Build package
+        if: ${{ inputs.npm }}
+        run: npm run build
+
+      - name: Publish to JSR
+        if: ${{ inputs.jsr }}
+        run: npx jsr publish
+
+      - name: Publish to NPM
+        if: ${{ inputs.npm }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
