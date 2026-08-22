@@ -1,7 +1,7 @@
 import { ChildProcess, type Serializable } from "node:child_process";
 
 import { BaseTransport } from "../base";
-import { TransportState } from "..";
+import { TransportState } from "../index";
 
 /**
  * Dual-mode transport for `child_process.fork`. In the parent process, requires `opts.child`;
