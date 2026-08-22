@@ -9,4 +9,4 @@ export interface CallContext {
   readonly signal: AbortSignal;
 }
 
-export const contextStorage = new AsyncLocalStorage<CallContext>();
+export const contextStorage: AsyncLocalStorage<CallContext> = new AsyncLocalStorage();

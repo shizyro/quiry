@@ -26,11 +26,20 @@ export interface TraceableErrorOptions {
 /** Maximum depth for the `cause` chain when serializing to/from wire. */
 export const MAX_CAUSE_DEPTH = 3;
 
+interface QuiryError {
+  /**
+   * Compact, human-readable representation for `console.log` / `util.inspect`.
+   * Avoids re-inspecting the full cause chain (Node's default dumps each level
+   * with source snippets, producing walls of near-duplicate output).
+   */
+  [inspect.custom](depth: number, opts: unknown, inspectFn: typeof inspect): string;
+}
+
 /**
  * The single in-process error class for quiry. Carries a structured status `code`
  * plus diagnostic context for both local handling and wire transport.
  */
-export class QuiryError extends Error {
+class QuiryError extends Error {
   readonly code: WireStatus;
   readonly cid?: CorrelationId;
   readonly detail?: Record<string, unknown>;
@@ -91,26 +100,30 @@ export class QuiryError extends Error {
     return new QuiryError(WireStatus.INTERNAL, String(error), { ...ctx });
   }
 
-  /**
-   * Compact, human-readable representation for `console.log` / `util.inspect`.
-   * Avoids re-inspecting the full cause chain (Node's default dumps each level
-   * with source snippets, producing walls of near-duplicate output).
-   */
-  [inspect.custom](_depth: number, _opts: unknown, _inspectFn: typeof inspect): string {
-    const meta: string[] = [`code=${WireStatus[this.code] ?? this.code}`];
-    if (this.cid) meta.push(`ref=${this.cid}`);
+  static {
+    QuiryError.prototype[inspect.custom] = function (
+      this: QuiryError,
+      _depth: number,
+      _opts: unknown,
+      _inspectFn: typeof inspect,
+    ): string {
+      const meta: string[] = [`code=${WireStatus[this.code] ?? this.code}`];
+      if (this.cid) meta.push(`ref=${this.cid}`);
 
-    const header = `\u001b[91m${this.name}: ${this.message} [${meta.join(", ")}]\u001b[39m`;
-    const stack = this.stack?.split("\n").slice(1).join("\n") ?? "";
-    const detail =
-      this.detail && Object.keys(this.detail).length > 0
-        ? `\n\tdetail: ${inspect(this.detail, { colors: false, depth: 2, breakLength: Infinity })}`
-        : "";
-    const cause = this.cause !== undefined ? `\n\tcaused by: ${describe(this.cause)}` : "";
+      const header = `\u001b[91m${this.name}: ${this.message} [${meta.join(", ")}]\u001b[39m`;
+      const stack = this.stack?.split("\n").slice(1).join("\n") ?? "";
+      const detail =
+        this.detail && Object.keys(this.detail).length > 0
+          ? `\n\tdetail: ${inspect(this.detail, { colors: false, depth: 2, breakLength: Infinity })}`
+          : "";
+      const cause = this.cause !== undefined ? `\n\tcaused by: ${describe(this.cause)}` : "";
 
-    return `${header}${stack ? "\n" + stack : ""}${detail}${cause}`;
+      return `${header}${stack ? "\n" + stack : ""}${detail}${cause}`;
+    };
   }
 }
+
+export { QuiryError };
 
 function describe(cause: unknown): string {
   if (cause instanceof QuiryError) {

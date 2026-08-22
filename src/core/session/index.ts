@@ -93,7 +93,7 @@ export class Session {
   private readonly options: Required<SessionOptions>;
 
   #state: SessionState = SessionState.CLOSED;
-  readonly diagnostic = new DiagnosticBus<DiagnosticSessionEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
+  readonly diagnostic: DiagnosticBus<DiagnosticSessionEvents> = new DiagnosticBus(DIAGNOSTIC_CHANNEL_PREFIX);
 
   /** A wrapper around the internal router to provide a more convenient API. */
   get channel(): InteractiveRouter {
@@ -224,7 +224,7 @@ export class Session {
    * Opens transport and starts the receive {@link Router}.
    * @throws {@link QuiryError} `FAILED_PRECONDITION` if not in `closed`, or transport/router errors.
    */
-  open() {
+  open(): this {
     if (this.#state !== SessionState.CLOSED)
       throw new QuiryError(WireStatus.FAILED_PRECONDITION, "Cannot open session in the current state");
 

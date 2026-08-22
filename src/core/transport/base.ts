@@ -21,7 +21,7 @@ const BACKPRESSURE_CRITICAL: number = 500;
  * as well as managing the transport state and backpressure.
  */
 export abstract class BaseTransport implements Transport<AnyPacket> {
-  protected readonly queue = new DeferredQueue<AnyPacket>(16);
+  protected readonly queue: DeferredQueue<AnyPacket> = new DeferredQueue(16);
   private readonly listeners = new Map<keyof TransportEvents, Set<(...args: unknown[]) => void>>();
 
   #state: TransportState = TransportState.CLOSED;

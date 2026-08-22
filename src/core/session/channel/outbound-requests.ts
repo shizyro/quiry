@@ -430,7 +430,7 @@ export class OutboundRequests {
    * are NOT handled here — the orchestrator dispatches those to
    * {@link InboundRequests} which owns the producer state.
    */
-  handleResponsePacket(packet: Packets.AnyResponsePacket) {
+  handleResponsePacket(packet: Packets.AnyResponsePacket): void {
     if (packet.type === Packets.ResponseMessageType.STREAM) {
       const entry = this.#pending.get(packet.payload.ref) as PendingStreamRequest | undefined;
       if (!entry) return; // stale; producer side or already cleaned up
