@@ -1,21 +1,21 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
   "files": {
-    "includes": ["./{src,tests,examples}/**/*.ts"]
+    "includes": ["./{src,tests,examples}/**/*.ts"],
   },
   "formatter": {
     "lineWidth": 110,
     "indentStyle": "space",
     "indentWidth": 2,
     "bracketSpacing": true,
-    "lineEnding": "lf"
+    "lineEnding": "lf",
   },
   "assist": {
     "actions": {
       "source": {
-        "organizeImports": "off"
-      }
-    }
+        "organizeImports": "off",
+      },
+    },
   },
   "linter": {
     "rules": {
@@ -23,7 +23,7 @@
         "noUnusedFunctionParameters": "off",
         "noUnusedPrivateClassMembers": "off",
         "noUnusedVariables": "off",
-        "noUnusedImports": "off"
+        "noUnusedImports": "off",
       },
       "suspicious": {
         "noFallthroughSwitchClause": "info",
@@ -32,7 +32,8 @@
         "useAwait": "off",
         "noAssignInExpressions": "off",
         "noEmptyInterface": "off",
-        "noBitwiseOperators": "off"
+        "noBitwiseOperators": "off",
+        "noUnsafeDeclarationMerging": "off",
       },
       "style": {
         "useDefaultSwitchClause": "off",
@@ -49,7 +50,7 @@
         "noUnusedTemplateLiteral": "warn",
         "useExponentiationOperator": "off",
         "useNumericSeparators": "info",
-        "useReadonlyClassProperties": "info"
+        "useReadonlyClassProperties": "info",
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": "off",
@@ -57,12 +58,12 @@
         "noThisInStatic": "warn",
         "noVoid": "off",
         "useArrowFunction": "off",
-        "noBannedTypes": "off"
+        "noBannedTypes": "off",
       },
       "nursery": {
         // "useMaxParams": "off",
-        "noShadow": "off"
-      }
-    }
-  }
+        "noShadow": "off",
+      },
+    },
+  },
 }

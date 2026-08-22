@@ -64,7 +64,7 @@ export class InboundRequests {
    * work and run inside the {@link InFlightTracker}; ABORT and CANCEL
    * are control packets handled inline without bumping the tracker.
    */
-  handleRequestPacket(packet: Packets.AnyRequestPacket) {
+  async handleRequestPacket(packet: Packets.AnyRequestPacket): Promise<void> {
     if (packet.type === Packets.RequestMessageType.ABORT) {
       this.#pending_operations.get(packet.payload.ref)?.controller.abort();
       this.ctx.diagnostic.maybe("inquiry:received")?.({

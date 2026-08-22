@@ -18,7 +18,7 @@ export class Queue<T> implements Iterable<T> {
     this.buffer = new Array(this.capacity);
   }
 
-  protected resize() {
+  protected resize(): void {
     const newCapacity = this.capacity * 2;
     const newBuffer = new Array<T | undefined>(newCapacity);
 

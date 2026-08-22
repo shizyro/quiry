@@ -45,7 +45,7 @@ const INFLIGHT_DRAIN_TIMEOUT: number = 5000;
  * @diagnostics `callback:invoke`, `callback:return`, `callback:release`.
  */
 export class CallbackBridge {
-  protected readonly registry = new CallbackRegistry();
+  protected readonly registry: CallbackRegistry = new CallbackRegistry();
   private readonly outbound = new InFlightTracker();
 
   /**
@@ -59,8 +59,8 @@ export class CallbackBridge {
   private readonly localFinalization: FinalizationRegistry<CallbackId>;
   private readonly remoteFinalization: FinalizationRegistry<CallbackId>;
 
-  protected readonly remoteCallbacks = new Map<CorrelationId, Set<CallbackId>>();
-  readonly #pending_invocations = new Map<InvocationId, PendingCallbackInvocation>();
+  protected readonly remoteCallbacks: Map<CorrelationId, Set<CallbackId>> = new Map();
+  readonly #pending_invocations: Map<InvocationId, PendingCallbackInvocation> = new Map();
 
   constructor(private readonly ctx: BridgeContext) {
     this.localFinalization = new FinalizationRegistry<CallbackId>((cbid: CallbackId) => {
@@ -113,7 +113,7 @@ export class CallbackBridge {
   // --------- PACKET HANDLING --------- //
 
   /** Routes an inbound CALLBACK packet by sub-type. */
-  handleCallbackPacket(packet: Packets.AnyCallbackPacket) {
+  async handleCallbackPacket(packet: Packets.AnyCallbackPacket): Promise<void> {
     switch (packet.type) {
       case Packets.CallbackMessageType.INVOKE:
         return this.#handleInvoke(packet);

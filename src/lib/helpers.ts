@@ -4,7 +4,7 @@ import type { AnyPacket } from "../protocol/packets";
  * Whether `value` can survive a structured-clone hop across a thread or
  * process boundary. Used as a fast pre-check before handing payloads.
  */
-export function isSerializable(value: unknown, seen = new WeakSet<object>()): value is Serializable {
+export function isSerializable(value: unknown, seen: WeakSet<object> = new WeakSet()): value is Serializable {
   if (value === null || value === undefined) return true;
 
   const t = typeof value;
@@ -108,7 +108,7 @@ export function isWirePacket(value: unknown): value is AnyPacket {
  * Recursively walks a packet to find array buffers and message ports that
  * should be transferred (zero-copy) rather than cloned.
  */
-export function collectTransferables(value: unknown, seen = new Set<object>()): Transferable[] {
+export function collectTransferables(value: unknown, seen: Set<object> = new Set()): Transferable[] {
   if (value === null || typeof value !== "object") return [];
   if (seen.has(value as object)) return [];
   seen.add(value as object);

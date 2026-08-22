@@ -55,7 +55,7 @@ const emitter = new EventEmitter<QuiryEvents>();
  * Module-level diagnostic bus. Bridges to `node:diagnostics_channel`
  * under the `quiry:` prefix for external observability tooling.
  */
-export const diagnostic = new DiagnosticBus<DiagnosticQuiryEvents>(DIAGNOSTIC_CHANNEL_PREFIX);
+export const diagnostic: DiagnosticBus<DiagnosticQuiryEvents> = new DiagnosticBus(DIAGNOSTIC_CHANNEL_PREFIX);
 
 /**
  * Subscribe to module-level peer lifecycle events. Returns an unsubscribe function.

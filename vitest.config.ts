@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
+import type { UserConfig } from "vite";
 
-export default defineConfig({
+const config: UserConfig = defineConfig({
   test: {
     globals: true,
     includeSource: ["./src/**/*.ts"],
@@ -9,3 +10,5 @@ export default defineConfig({
     alias: { "~": "./src" },
   },
 });
+
+export default config;

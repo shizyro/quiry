@@ -112,7 +112,7 @@ export interface QuiryEvents {
  * via the `satisfies` check below — adding an event to the interface without
  * adding it here is a compile error in tests that iterate {@link SESSION_EVENT_NAMES}.
  */
-export const SESSION_EVENT_NAMES = [
+export const SESSION_EVENT_NAMES: ReadonlyArray<keyof SessionEvents> = [
   "session:open",
   "session:state",
   "session:terminate",
@@ -133,12 +133,13 @@ export const SESSION_EVENT_NAMES = [
   "drain:phase",
   "transport:error",
   "transport:backpressure",
-] as const satisfies ReadonlyArray<keyof SessionEvents>;
+] as const;
 
 /** Runtime catalog of module-level events. */
-export const QUIRY_EVENT_NAMES = ["peer:attached", "peer:detached"] as const satisfies ReadonlyArray<
-  keyof QuiryEvents
->;
+export const QUIRY_EVENT_NAMES: ReadonlyArray<keyof QuiryEvents> = [
+  "peer:attached",
+  "peer:detached",
+] as const;
 
 /**
  * Compile-time completeness check: ensures every key in {@link SessionEvents}
