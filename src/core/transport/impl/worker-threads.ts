@@ -2,7 +2,7 @@ import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import type { MessagePort, Transferable } from "node:worker_threads";
 
 import { BaseTransport } from "../base";
-import { TransportState } from "..";
+import { TransportState } from "../index";
 
 /**
  * Dual-mode transport for `worker_threads`. In the main thread, requires `opts.worker`;

@@ -5,7 +5,7 @@ import {
   type TransportEvents,
   type BackpressureSignal,
   BackpressureState,
-} from ".";
+} from "./index";
 
 import { DeferredQueue } from "../../lib/queue";
 import { isWirePacket, collectTransferables } from "../../lib/helpers";
